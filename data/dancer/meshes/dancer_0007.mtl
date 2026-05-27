@@ -1,0 +1,7 @@
+# Created by Open3D 
+# object name: dancer_0007
+newmtl dancer_0007_0
+Ka 1.000 1.000 1.000
+Kd 1.000 1.000 1.000
+Ks 0.000 0.000 0.000
+map_Kd dancer_0007_0.png

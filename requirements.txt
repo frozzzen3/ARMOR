@@ -1,0 +1,8 @@
+plyfile==0.8.1
+trimesh==4.0.5
+SciPy==1.7.3 
+tqdm
+chumpy==0.70
+smplx==0.1.28
+open3d==0.17.0
+opencv-python
