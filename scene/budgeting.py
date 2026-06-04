@@ -321,6 +321,15 @@ def _unbounded_proportional_allocate(
     return alloc
 
 
+def allocate_splats_from_weights(weights: np.ndarray, total_splats: int) -> np.ndarray:
+    """
+    Public wrapper for converting triangle importance weights into integer
+    splat counts. Keeps sequence-level allocation on the same path as the
+    existing per-frame budgeting policies.
+    """
+    return _unbounded_proportional_allocate(weights, total_splats)
+
+
 
 
 # [TODO] [DOING] implement this
@@ -1047,7 +1056,6 @@ class DistortionMapBudgetingPolicy(BudgetingPolicy):
             print(f"[INFO] Saved distortion debug to {base_dir}")
         except Exception as e:
             print(f"[WARNING] Could not save debug visualization: {e}")
-
 
 
 

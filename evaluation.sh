@@ -1,10 +1,10 @@
 #! /usr/bin/env bash
 set -euo pipefail
 
-GPU_ID="${GPU_ID:-1}"
-OUTPUT="${OUTPUT:-output/dancer_old}"
+GPU_ID="${GPU_ID:-0}"
+OUTPUT="${OUTPUT:-output/dancer_network}"
 START_FRAME="${START_FRAME:-1}"
-END_FRAME="${END_FRAME:-1}"
+END_FRAME="${END_FRAME:-10}"
 GS_TYPE="${GS_TYPE:-gs_mesh}"
 
 model_paths=()

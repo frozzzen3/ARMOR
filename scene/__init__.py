@@ -13,6 +13,8 @@ import os
 import random
 import json
 import typing
+import shutil
+from pathlib import Path
 
 from utils.system_utils import searchForMaxIteration
 from games.scenes import sceneLoadTypeCallbacks
@@ -133,17 +135,18 @@ class Scene:
             total_splats = args.total_splats
         
         print(f"[INFO] Scene:: total_splats for budgeting policy copy: {total_splats}")
-        computed_policy_path = os.path.join(
-            args.source_path, 
+        dataset_policy_path = Path(args.source_path) / (
             f"policy/mesh_{args.mesh_type}/tri_{num_tri}/{args.alloc_policy}/{total_splats}.npy"
         )
-        copy_dest = os.path.join(self.model_path, f"{args.alloc_policy}_{total_splats}.npy")
-        print(f"[INFO] Copying computed budgeting policy from {computed_policy_path} to {copy_dest}")
-        if os.path.exists(computed_policy_path):
-            with open(computed_policy_path, 'rb') as src_file, open(copy_dest , 'wb') as dest_file:
-                dest_file.write(src_file.read())
-        else:    
-            print(f"[WARNING] Didn't find computed budgeting policy file at {computed_policy_path}, skipping copy.")
+        active_policy_path = Path(policy_path) if policy_path else dataset_policy_path
+        if active_policy_path.exists():
+            copy_name = active_policy_path.name if policy_path else f"{args.alloc_policy}_{total_splats}.npy"
+            copy_dest = Path(self.model_path) / copy_name
+            print(f"[INFO] Copying active budgeting policy from {active_policy_path} to {copy_dest}")
+            if active_policy_path.resolve() != copy_dest.resolve():
+                shutil.copyfile(active_policy_path, copy_dest)
+        else:
+            print(f"[WARNING] Didn't find budgeting policy file at {active_policy_path}, skipping copy.")
         
         
         

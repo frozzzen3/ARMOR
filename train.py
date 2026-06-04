@@ -13,6 +13,7 @@
 
 from itertools import count
 import os
+import json
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -75,6 +76,22 @@ from renderer.mesh_renderer.mesh_utils import ensure_mesh_has_texture
 
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
+from scene.dataset_readers import (
+    infer_mesh_image_subdir,
+    readCamerasFromTransforms,
+    readColmapCameras,
+)
+from scene.colmap_loader import (
+    read_extrinsics_binary,
+    read_extrinsics_text,
+    read_intrinsics_binary,
+    read_intrinsics_text,
+)
+from scene.budgeting import allocate_splats_from_weights, get_budgeting_policy
+from games.mesh_splatting.scene.temporal_attribute_model import (
+    CompactTemporalAttributeModel,
+    estimate_compact_temporal_storage,
+)
 
 
 # [good to have] loss-informed stop criteria
@@ -264,10 +281,227 @@ def extract_dataset_args(model_params, run_args):
     return dataset
 
 
+def get_total_splats_for_mesh(dataset, num_triangles):
+    if dataset.total_splats is None:
+        return int(dataset.budget_per_tri * num_triangles)
+    return dataset.total_splats
+
+
+def load_policy_camera_infos(dataset, texture_obj_path):
+    if os.path.exists(os.path.join(dataset.source_path, "transforms_train.json")):
+        image_subdir = infer_mesh_image_subdir(texture_obj_path)
+        train_cam_infos = readCamerasFromTransforms(
+            dataset.source_path,
+            "transforms_train.json",
+            dataset.white_background,
+            ".png",
+            image_subdir=image_subdir,
+        )
+        test_cam_infos = readCamerasFromTransforms(
+            dataset.source_path,
+            "transforms_test.json",
+            dataset.white_background,
+            ".png",
+            image_subdir=image_subdir,
+        )
+        if not dataset.eval:
+            train_cam_infos.extend(test_cam_infos)
+        return train_cam_infos
+
+    if os.path.exists(os.path.join(dataset.source_path, "sparse")):
+        try:
+            cam_extrinsics = read_extrinsics_binary(os.path.join(dataset.source_path, "sparse/0", "images.bin"))
+            cam_intrinsics = read_intrinsics_binary(os.path.join(dataset.source_path, "sparse/0", "cameras.bin"))
+        except Exception:
+            cam_extrinsics = read_extrinsics_text(os.path.join(dataset.source_path, "sparse/0", "images.txt"))
+            cam_intrinsics = read_intrinsics_text(os.path.join(dataset.source_path, "sparse/0", "cameras.txt"))
+
+        reading_dir = "images" if dataset.images is None else dataset.images
+        cam_infos = readColmapCameras(
+            cam_extrinsics=cam_extrinsics,
+            cam_intrinsics=cam_intrinsics,
+            images_folder=os.path.join(dataset.source_path, reading_dir),
+        )
+        cam_infos = sorted(cam_infos, key=lambda x: x.image_name)
+        if dataset.eval:
+            return [c for idx, c in enumerate(cam_infos) if idx % 8 != 0]
+        return cam_infos
+
+    raise ValueError("Could not recognize scene type for sequence allocation.")
+
+
+def load_budgeting_trimesh(texture_obj_path):
+    mesh_scene = trimesh.load(texture_obj_path, force="mesh", process=False)
+    mesh_scene.apply_transform(trimesh.transformations.rotation_matrix(
+        angle=-np.pi / 2,
+        direction=[1, 0, 0],
+        point=[0, 0, 0],
+    ))
+    return mesh_scene
+
+
+def validate_sequence_topology(reference_faces, mesh_faces, mesh_path, strict=False):
+    if reference_faces.shape != mesh_faces.shape:
+        raise ValueError(
+            "Sequence-aware allocation requires identical mesh topology. "
+            f"{mesh_path} has faces shape {mesh_faces.shape}, expected {reference_faces.shape}."
+        )
+    if strict and not np.array_equal(reference_faces, mesh_faces):
+        raise ValueError(
+            "Sequence-aware allocation requires stable face ordering/indices. "
+            f"{mesh_path} does not match the first frame's face array."
+        )
+    if not strict and not np.array_equal(reference_faces, mesh_faces):
+        print(
+            "[WARNING] Sequence-aware allocation: face indices differ from the first frame "
+            f"for {mesh_path}, but face array shape matches. Assuming triangle row order "
+            "is the temporal correspondence."
+        )
+
+
+def reduce_sequence_weights(frame_weights, reduction):
+    stacked = np.stack(frame_weights, axis=0)
+    if reduction == "mean":
+        weights = stacked.mean(axis=0)
+    elif reduction == "max":
+        weights = stacked.max(axis=0)
+    elif reduction == "mean_max":
+        weights = 0.5 * stacked.mean(axis=0) + 0.5 * stacked.max(axis=0)
+    else:
+        raise ValueError(f"Unknown sequence weight reduction: {reduction}")
+
+    return np.maximum(weights.astype(np.float32), 1e-8)
+
+
+def sequence_frame_label(mesh_paths):
+    first = extract_frame_index(mesh_paths[0])
+    last = extract_frame_index(mesh_paths[-1])
+    if first is not None and last is not None:
+        return f"frames_{first:04d}_{last:04d}"
+    return f"{mesh_paths[0].stem}_to_{mesh_paths[-1].stem}"
+
+
+def default_sequence_policy_path(dataset, mesh_paths, num_triangles, total_splats, reduction):
+    policy_name = f"{dataset.alloc_policy}_sequence_{reduction}"
+    return Path(dataset.source_path) / (
+        f"policy/mesh_{dataset.mesh_type}/tri_{num_triangles}/"
+        f"{policy_name}/{sequence_frame_label(mesh_paths)}/{total_splats}.npy"
+    )
+
+
+def normalized_frame_time(mesh_path, mesh_paths):
+    if len(mesh_paths) <= 1:
+        return 0.0
+    try:
+        index = mesh_paths.index(Path(mesh_path))
+    except ValueError:
+        index = 0
+    return float(index) / float(len(mesh_paths) - 1)
+
+
+def write_temporal_storage_report(gaussians, temporal_model, num_frames, report_path):
+    report = estimate_compact_temporal_storage(gaussians, temporal_model, num_frames)
+    report_path = Path(report_path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(report_path, "w") as fh:
+        json.dump(report, fh, indent=2)
+
+    duplicated_mb = report["duplicated_per_frame_bytes"] / (1024 * 1024)
+    compact_mb = report["compact_temporal_bytes"] / (1024 * 1024)
+    saved_pct = report["estimated_savings_ratio"] * 100.0
+    print(
+        "[INFO] Compact temporal storage estimate: "
+        f"duplicated={duplicated_mb:.2f} MiB, compact={compact_mb:.2f} MiB, "
+        f"saved={saved_pct:.1f}% ({report_path})"
+    )
+    return report
+
+
+def ensure_sequence_policy_file(base_args, model_params, mesh_paths, requested_policy_path=""):
+    first_run_args = build_frame_run_args(base_args, mesh_paths[0], use_subdir=False)
+    dataset = extract_dataset_args(model_params, first_run_args)
+    reduction = base_args.sequence_weight_reduction
+    recompute = base_args.recompute_sequence_policy
+
+    if requested_policy_path and Path(requested_policy_path).exists() and not recompute:
+        print(f"[INFO] Using existing sequence policy: {requested_policy_path}")
+        return requested_policy_path
+
+    print(f"[INFO] Computing sequence-aware allocation over {len(mesh_paths)} mesh frames.")
+    reference_faces = None
+    frame_weights = []
+    num_triangles = None
+
+    for mesh_path in mesh_paths:
+        run_args = build_frame_run_args(base_args, mesh_path, use_subdir=False)
+        frame_dataset = extract_dataset_args(model_params, run_args)
+        mesh_scene = load_budgeting_trimesh(str(mesh_path))
+        faces = np.asarray(mesh_scene.faces)
+
+        if reference_faces is None:
+            reference_faces = faces.copy()
+            num_triangles = int(faces.shape[0])
+        else:
+            validate_sequence_topology(
+                reference_faces,
+                faces,
+                mesh_path,
+                strict=base_args.strict_sequence_topology,
+            )
+
+        train_cam_infos = load_policy_camera_infos(frame_dataset, str(mesh_path))
+        p3d_mesh = None
+        if frame_dataset.alloc_policy.startswith("distortion"):
+            p3d_mesh = load_textured_mesh(frame_dataset, str(mesh_path))
+
+        budgeting_policy = get_budgeting_policy(
+            frame_dataset.alloc_policy,
+            mesh=mesh_scene,
+            viewpoint_camera_infos=train_cam_infos,
+            dataset_path=frame_dataset.source_path,
+            mesh_type=frame_dataset.mesh_type,
+            p3d_mesh=p3d_mesh,
+        )
+        frame_weights.append(np.asarray(budgeting_policy.weights, dtype=np.float32))
+        if p3d_mesh is not None:
+            del p3d_mesh
+            torch.cuda.empty_cache()
+
+    total_splats = get_total_splats_for_mesh(dataset, num_triangles)
+    sequence_weights = reduce_sequence_weights(frame_weights, reduction)
+    num_splats_per_triangle = allocate_splats_from_weights(sequence_weights, total_splats)
+
+    if requested_policy_path:
+        allocation_save_path = Path(requested_policy_path)
+    else:
+        allocation_save_path = default_sequence_policy_path(
+            dataset,
+            mesh_paths,
+            num_triangles,
+            total_splats,
+            reduction,
+        )
+
+    allocation_save_path.parent.mkdir(parents=True, exist_ok=True)
+    weights_save_path = allocation_save_path.parent / "weights.npy"
+    np.save(allocation_save_path, num_splats_per_triangle)
+    np.save(weights_save_path, sequence_weights)
+
+    print(f"[INFO] Saved sequence allocation policy to: {allocation_save_path}")
+    print(f"[INFO] Saved sequence weights to: {weights_save_path}")
+    print(f"[INFO] Sequence policy splats: total={num_splats_per_triangle.sum()}, "
+          f"min={num_splats_per_triangle.min()}, max={num_splats_per_triangle.max()}, "
+          f"mean={num_splats_per_triangle.mean():.2f}")
+
+    return str(allocation_save_path)
+
+
 def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
                       debugging, debug_freq, occlusion, precaptured_mesh_img_path,
                       texture_obj_path, mesh_rasterizer_type, num_iterations,
-                      save_at_end=True):
+                      save_at_end=True, temporal_model=None,
+                      temporal_frame_time=None, temporal_start_iteration=0,
+                      temporal_num_frames=1):
     if debugging:
         print("[DEBUG] [INFO] Debugging mode is on.")
         check_path = Path(scene.model_path) / "debugging" / "training_check"
@@ -282,6 +516,8 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
     viewpoint_stack = None
     frame_subdir = infer_mesh_frame_subdir(texture_obj_path) if precaptured_mesh_img_path else None
     gaussians.optimizer.zero_grad(set_to_none=True)
+    if temporal_model is not None:
+        temporal_model.optimizer.zero_grad(set_to_none=True)
 
     for iteration in range(1, num_iterations + 1):
         os.makedirs(f"{scene.model_path}/xyz", exist_ok=True)
@@ -289,6 +525,10 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
             torch.save(gaussians.get_xyz, f"{scene.model_path}/xyz/{iteration}.pt")
 
         gaussians.update_learning_rate(iteration)
+        if temporal_model is not None and iteration >= temporal_start_iteration:
+            gaussians.apply_temporal_attributes(temporal_model, temporal_frame_time or 0.0)
+        elif hasattr(gaussians, "clear_temporal_attributes"):
+            gaussians.clear_temporal_attributes()
 
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
@@ -370,6 +610,9 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
             if iteration < num_iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
+                if temporal_model is not None and iteration >= temporal_start_iteration:
+                    temporal_model.optimizer.step()
+                    temporal_model.optimizer.zero_grad(set_to_none=True)
 
         if hasattr(gaussians, 'update_alpha'):
             gaussians.update_alpha()
@@ -378,6 +621,9 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
 
     gaussians.optimizer.step()
     gaussians.optimizer.zero_grad(set_to_none=True)
+    if temporal_model is not None:
+        temporal_model.optimizer.step()
+        temporal_model.optimizer.zero_grad(set_to_none=True)
     if hasattr(gaussians, 'update_alpha'):
         gaussians.update_alpha()
     if hasattr(gaussians, 'prepare_scaling_rot'):
@@ -385,7 +631,18 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
     progress_bar.close()
 
     if save_at_end:
+        if temporal_model is not None and hasattr(gaussians, "clear_temporal_attributes"):
+            gaussians.clear_temporal_attributes()
         scene.save(num_iterations)
+        if temporal_model is not None:
+            temporal_path = Path(scene.model_path) / "point_cloud" / f"iteration_{num_iterations}" / "temporal_attr_model.pth"
+            temporal_model.save(temporal_path)
+            write_temporal_storage_report(
+                gaussians,
+                temporal_model,
+                temporal_num_frames,
+                Path(scene.model_path) / "temporal_storage_report.json",
+            )
 
 
 def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
@@ -399,6 +656,14 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
 
     gaussians = gaussianModel[gs_type](base_args.sh_degree)
     canonical_policy_path = requested_policy_path or ""
+
+    if len(mesh_paths) > 1 and (not canonical_policy_path or not Path(canonical_policy_path).exists()):
+        canonical_policy_path = ensure_sequence_policy_file(
+            base_args,
+            model_params,
+            mesh_paths,
+            requested_policy_path=canonical_policy_path,
+        )
 
     first_run_args = build_frame_run_args(base_args, canonical_mesh, use_subdir=len(mesh_paths) > 1)
     dataset_args = extract_dataset_args(model_params, first_run_args)
@@ -415,6 +680,35 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
         initialize_gaussians=True,
     )
     gaussians.training_setup(opt)
+    temporal_model = None
+    if base_args.temporal_attributes:
+        num_triangles = int(scene.point_cloud.triangles.shape[0])
+        temporal_model = CompactTemporalAttributeModel(
+            num_triangles=num_triangles,
+            latent_dim=base_args.temporal_attr_latent_dim,
+            hidden_dim=base_args.temporal_attr_width,
+            depth=base_args.temporal_attr_depth,
+            time_frequencies=base_args.temporal_attr_time_frequencies,
+            max_d_uvw=base_args.temporal_max_d_uvw,
+            max_d_scaling=base_args.temporal_max_d_scaling,
+            max_d_opacity=base_args.temporal_max_d_opacity,
+            max_d_color=base_args.temporal_max_d_color,
+            predict_uvw=base_args.temporal_predict_uvw,
+            predict_scaling=base_args.temporal_predict_scaling,
+            predict_opacity=base_args.temporal_predict_opacity,
+            predict_color=base_args.temporal_predict_color,
+            lr=base_args.temporal_attr_lr,
+        ).cuda()
+        print(
+            "[INFO] Compact temporal attribute model enabled: "
+            f"{temporal_model.parameter_count} parameters for {len(mesh_paths)} frames"
+        )
+        write_temporal_storage_report(
+            gaussians,
+            temporal_model,
+            len(mesh_paths),
+            Path(base_args.model_path) / "temporal_storage_report_initial.json",
+        )
     canonical_policy_path = ensure_canonical_policy_file(scene, dataset_args, requested_policy_path)
 
     run_training_loop(
@@ -432,6 +726,10 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
         texture_obj_path=str(canonical_mesh),
         mesh_rasterizer_type=mesh_rasterizer_type,
         num_iterations=canonical_iterations,
+        temporal_model=temporal_model,
+        temporal_frame_time=normalized_frame_time(canonical_mesh, mesh_paths),
+        temporal_start_iteration=base_args.temporal_start_iter,
+        temporal_num_frames=len(mesh_paths),
     )
 
     for mesh_path in ordered_meshes[1:]:
@@ -472,7 +770,22 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
             texture_obj_path=str(mesh_path),
             mesh_rasterizer_type=mesh_rasterizer_type,
             num_iterations=temporal_iterations,
+            temporal_model=temporal_model,
+            temporal_frame_time=normalized_frame_time(mesh_path, mesh_paths),
+            temporal_start_iteration=base_args.temporal_start_iter,
+            temporal_num_frames=len(mesh_paths),
         )
+
+    if temporal_model is not None:
+        root_temporal_path = Path(base_args.model_path) / "temporal_attr_model.pth"
+        temporal_model.save(root_temporal_path)
+        write_temporal_storage_report(
+            gaussians,
+            temporal_model,
+            len(mesh_paths),
+            Path(base_args.model_path) / "temporal_storage_report.json",
+        )
+        print(f"[INFO] Saved final compact temporal model to: {root_temporal_path}")
 
 
    
@@ -629,8 +942,8 @@ def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations,
             print(f"[INFO] Saved precaptured results for [testing] {cam.image_name}")
         
         
-        print("[INFO] Warmup stage complete. Exiting...")
-        exit() # [NOTE] early exit for warmup-only stage     
+        print("[INFO] Warmup stage complete.")
+        return # [NOTE] early return for warmup-only stage     
     
     
     print("[INFO] Finished Warm-Up, Start Training..." )
@@ -1116,6 +1429,43 @@ if __name__ == "__main__":
                         help="Number of iterations for the canonical frame in temporal gs_mesh training")
     parser.add_argument("--temporal_iterations", type=int, default=500,
                         help="Number of fine-tuning iterations for subsequent frames in temporal gs_mesh training")
+    parser.add_argument("--sequence_weight_reduction", type=str, default="max",
+                        choices=["mean", "max", "mean_max"],
+                        help="How to aggregate per-frame triangle weights into one sequence policy")
+    parser.add_argument("--recompute_sequence_policy", action="store_true",
+                        help="Recompute sequence-aware policy even when --policy_path already exists")
+    parser.add_argument("--strict_sequence_topology", action="store_true",
+                        help="Require every frame to have the exact same face index array as the first frame")
+    parser.add_argument("--temporal_attributes", action="store_true",
+                        help="Enable compact neural prediction of Gaussian attribute residuals over time")
+    parser.add_argument("--temporal_attr_lr", type=float, default=1e-3,
+                        help="Learning rate for compact temporal attribute module")
+    parser.add_argument("--temporal_attr_width", type=int, default=64,
+                        help="Hidden width of compact temporal attribute MLP")
+    parser.add_argument("--temporal_attr_depth", type=int, default=3,
+                        help="Hidden depth of compact temporal attribute MLP")
+    parser.add_argument("--temporal_attr_latent_dim", type=int, default=8,
+                        help="Per-triangle latent dimension for compact temporal attributes")
+    parser.add_argument("--temporal_attr_time_frequencies", type=int, default=6,
+                        help="Number of sinusoidal time frequencies")
+    parser.add_argument("--temporal_start_iter", type=int, default=100,
+                        help="Iteration before temporal residuals start training")
+    parser.add_argument("--temporal_max_d_uvw", type=float, default=0.05,
+                        help="Clamp magnitude for raw UVW residuals")
+    parser.add_argument("--temporal_max_d_scaling", type=float, default=0.10,
+                        help="Clamp magnitude for log-scaling residuals")
+    parser.add_argument("--temporal_max_d_opacity", type=float, default=0.50,
+                        help="Clamp magnitude for opacity-logit residuals")
+    parser.add_argument("--temporal_max_d_color", type=float, default=0.10,
+                        help="Clamp magnitude for DC color residuals")
+    parser.add_argument("--temporal_predict_uvw", action="store_true",
+                        help="Predict temporal UVW residuals")
+    parser.add_argument("--temporal_predict_scaling", action="store_true",
+                        help="Predict temporal scaling residuals")
+    parser.add_argument("--temporal_predict_opacity", action="store_true",
+                        help="Predict temporal opacity residuals")
+    parser.add_argument("--temporal_predict_color", action="store_true",
+                        help="Predict temporal DC color residuals")
     
     lp = ModelParams(parser) # LoadingParams
     args, _ = parser.parse_known_args(sys.argv[1:])
@@ -1134,6 +1484,15 @@ if __name__ == "__main__":
     op = optimizationParamTypeCallbacks[args.gs_type](parser)
     pp = PipelineParams(parser)
     args = parser.parse_args(sys.argv[1:])
+    if args.temporal_attributes and not any([
+        args.temporal_predict_uvw,
+        args.temporal_predict_scaling,
+        args.temporal_predict_opacity,
+        args.temporal_predict_color,
+    ]):
+        args.temporal_predict_scaling = True
+        args.temporal_predict_opacity = True
+        args.temporal_predict_color = True
 
     args.save_iterations.append(args.iterations)
 
@@ -1154,8 +1513,45 @@ if __name__ == "__main__":
         if not mesh_path.exists():
             raise FileNotFoundError(f"Mesh file not found: {mesh_path}")
 
-    use_temporal_sequence = args.gs_type == "gs_mesh" and len(mesh_paths) > 1
-    if use_temporal_sequence:
+    use_mesh_sequence = args.gs_type == "gs_mesh" and len(mesh_paths) > 1
+    sequence_policy_path = args.policy_path
+    if use_mesh_sequence:
+        sequence_policy_path = ensure_sequence_policy_file(
+            args,
+            lp,
+            mesh_paths,
+            requested_policy_path=args.policy_path,
+        )
+
+    if args.warmup_only:
+        for mesh_path in mesh_paths:
+            run_args = Namespace(**vars(args))
+            run_args.texture_obj_path = str(mesh_path)
+            if use_mesh_sequence:
+                frame_subdir = infer_mesh_frame_subdir(run_args.texture_obj_path)
+                if frame_subdir is not None:
+                    run_args.model_path = append_subdir(args.model_path, frame_subdir)
+                run_args.policy_path = sequence_policy_path
+
+            print(f"[INFO] Warmup mesh: {run_args.texture_obj_path}")
+            if run_args.model_path:
+                print(f"[INFO] Model output: {run_args.model_path}")
+            if run_args.policy_path:
+                print(f"[INFO] Policy path: {run_args.policy_path}")
+
+            training(
+                run_args.gs_type,
+                lp.extract(run_args), op.extract(run_args), pp.extract(run_args),
+                run_args.test_iterations, run_args.save_iterations, run_args.checkpoint_iterations,
+                run_args.start_checkpoint, run_args.debug_from, run_args.save_xyz,
+                texture_obj_path=run_args.texture_obj_path,
+                debugging=run_args.debugging, debug_freq=run_args.debug_freq,
+                occlusion=run_args.occlusion,
+                policy_path=run_args.policy_path,
+                precaptured_mesh_img_path=run_args.precaptured_mesh_img_path,
+                mesh_rasterizer_type=run_args.mesh_rasterizer_type
+            )
+    elif use_mesh_sequence:
         canonical_iterations = args.canonical_iterations or args.iterations
         training_sequence(
             gs_type=args.gs_type,
@@ -1167,7 +1563,7 @@ if __name__ == "__main__":
             debugging=args.debugging,
             debug_freq=args.debug_freq,
             occlusion=args.occlusion,
-            requested_policy_path=args.policy_path,
+            requested_policy_path=sequence_policy_path,
             precaptured_mesh_img_path=args.precaptured_mesh_img_path,
             mesh_rasterizer_type=args.mesh_rasterizer_type,
             canonical_frame=args.canonical_frame,

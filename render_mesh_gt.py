@@ -82,6 +82,21 @@ def build_output_path(out_root, rel_path, mesh_subdir=None):
     return Path(out_root) / mesh_subdir / rel_without_suffix
 
 
+def resolve_frame_image_path(dataset_root, rel_path, extension, mesh_subdir=None):
+    rel_path = Path(rel_path)
+    direct_path = Path(dataset_root) / f"{rel_path}{extension}"
+    if direct_path.exists() or mesh_subdir is None:
+        return direct_path
+
+    parts = rel_path.parts
+    if parts and parts[0] in {"train", "test"}:
+        nested_path = Path(dataset_root) / parts[0] / mesh_subdir / f"{Path(*parts[1:])}{extension}"
+    else:
+        nested_path = Path(dataset_root) / mesh_subdir / f"{rel_path}{extension}"
+
+    return nested_path if nested_path.exists() else direct_path
+
+
 def load_textured_mesh(mesh_type, mesh_path):
     if mesh_type == "sugar":
         if not mesh_path.lower().endswith(".obj"):
@@ -187,9 +202,9 @@ def mesh_renderer_pytorch3d(viewpoint_camera, textured_mesh, image_height, image
     return bg_color, bg_depth, fragments
 
 
-def build_viewpoint_camera(frame, dataset_root, extension, znear, zfar):
+def build_viewpoint_camera(frame, dataset_root, extension, znear, zfar, mesh_subdir=None):
     image_rel = frame["file_path"][2:] if frame["file_path"].startswith("./") else frame["file_path"]
-    image_path = Path(dataset_root) / f"{image_rel}{extension}"
+    image_path = resolve_frame_image_path(dataset_root, image_rel, extension, mesh_subdir=mesh_subdir)
 
     c2w = np.array(frame["transform_matrix"], dtype=np.float32)
     c2w[:3, 1:3] *= -1
@@ -224,7 +239,14 @@ def render_split(textured_mesh, json_path, out_root, extension, mesh_rasterizer_
     for idx, frame in enumerate(tqdm(frames, desc=f"Rendering {Path(json_path).name}", unit="frame")):
         frame = dict(frame)
         frame["camera_angle_x"] = camera_angle_x
-        viewpoint_camera = build_viewpoint_camera(frame, dataset_root, extension, znear, zfar)
+        viewpoint_camera = build_viewpoint_camera(
+            frame,
+            dataset_root,
+            extension,
+            znear,
+            zfar,
+            mesh_subdir=mesh_subdir,
+        )
 
         if mesh_rasterizer_type == "pytorch3d":
             bg_color, _, _ = mesh_renderer_pytorch3d(
@@ -280,7 +302,7 @@ def main():
             raise FileNotFoundError(f"Mesh file not found: {mesh_path}")
 
         mesh_subdir = None
-        if len(mesh_paths) > 1:
+        if len(mesh_paths) > 1 or args.mesh_start is not None:
             mesh_subdir = build_mesh_subdir(mesh_path, args.mesh_folder_prefix)
 
         print(f"Rendering mesh: {mesh_path}")

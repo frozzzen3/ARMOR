@@ -48,6 +48,7 @@ class GaussianMeshModel(GaussianModel):
         # >>>> [YC] add
         self.triangle_indices = None
         # <<<< [YC] add
+        self.clear_temporal_attributes(update_geometry=False)
 
     @property
     def get_xyz(self):
@@ -56,6 +57,27 @@ class GaussianMeshModel(GaussianModel):
     @property
     def get_uvw(self):
         return self.uvw
+
+    @property
+    def get_scaling(self):
+        scaling = self._scaling
+        if self.temporal_d_scaling is not None:
+            scaling = scaling + self.temporal_d_scaling
+        return self.scaling_activation(scaling)
+
+    @property
+    def get_features(self):
+        features_dc = self._features_dc
+        if self.temporal_d_features_dc is not None:
+            features_dc = features_dc + self.temporal_d_features_dc
+        return torch.cat((features_dc, self._features_rest), dim=1)
+
+    @property
+    def get_opacity(self):
+        opacity = self._opacity
+        if self.temporal_d_opacity is not None:
+            opacity = opacity + self.temporal_d_opacity
+        return self.opacity_activation(opacity)
 
     @property
     def get_mesh_id(self):
@@ -190,8 +212,10 @@ class GaussianMeshModel(GaussianModel):
         self.update_alpha()
         self.prepare_scaling_rot()
 
-    def _decode_uvw(self):
+    def _decode_uvw(self, include_temporal=True):
         raw = self._uvw
+        if include_temporal and self.temporal_d_uvw is not None:
+            raw = raw + self.temporal_d_uvw
         w1 = torch.sigmoid(raw[:, 0:1])
         w2 = torch.sigmoid(raw[:, 1:2]) * (1.0 - w1)
         w3 = torch.sigmoid(raw[:, 2:3])
@@ -308,6 +332,26 @@ class GaussianMeshModel(GaussianModel):
         self.triangles = self.vertices[self.faces]
         self._calc_xyz()
 
+    def apply_temporal_attributes(self, temporal_model, frame_time):
+        if temporal_model is None:
+            self.clear_temporal_attributes()
+            return
+        base_uvw = self._decode_uvw(include_temporal=False)
+        deltas = temporal_model(self.triangle_indices, base_uvw, frame_time)
+        self.temporal_d_uvw = deltas.get("d_uvw")
+        self.temporal_d_scaling = deltas.get("d_scaling")
+        self.temporal_d_opacity = deltas.get("d_opacity")
+        self.temporal_d_features_dc = deltas.get("d_features_dc")
+        self.update_alpha()
+
+    def clear_temporal_attributes(self, update_geometry=True):
+        self.temporal_d_uvw = None
+        self.temporal_d_scaling = None
+        self.temporal_d_opacity = None
+        self.temporal_d_features_dc = None
+        if update_geometry and self.vertices is not None and self.faces is not None and self.triangle_indices is not None:
+            self.update_alpha()
+
     def update_alpha_triangle(self):
         """
         Update alpha values triangle by triangle instead of all at once.
@@ -332,6 +376,7 @@ class GaussianMeshModel(GaussianModel):
         pass
 
     def save_ply(self, path):
+        self.clear_temporal_attributes()
         self.update_alpha()
         self.prepare_scaling_rot()
         self._save_ply(path)
