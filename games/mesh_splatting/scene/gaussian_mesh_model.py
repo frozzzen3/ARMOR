@@ -293,22 +293,12 @@ class GaussianMeshModel(GaussianModel):
         s2 = dot(v2_init, v2) / 2.
         s0 = self.eps_s0 * torch.ones_like(s1)
         scales = torch.concat((s0, s1, s2), dim=1).unsqueeze(dim=1)
-        
-        # scales = scales.broadcast_to((*self.alpha.shape[:2], 3))
-        # self._scaling = torch.log(
-        #     torch.nn.functional.relu(self._scale * scales.flatten(start_dim=0, end_dim=1)) + self.eps_s0
-        # )
-        # rotation = torch.stack((v0, v1, v2), dim=1).unsqueeze(dim=1)
-        # rotation = rotation.broadcast_to((*self.alpha.shape[:2], 3, 3)).flatten(start_dim=0, end_dim=1)
-        # rotation = rotation.transpose(-2, -1)
-        # self._rotation = rot_to_quat_batch(rotation)
-        
+
         scales = scales[self.triangle_indices]
         s_input = self._scale * scales.flatten(start_dim=0, end_dim=1)
         s_input = torch.nn.functional.relu(s_input) + self.eps_s0
         self._scaling = torch.log(s_input)
         rotation = torch.stack((v0, v1, v2), dim=1).unsqueeze(dim=1)
-        # rotation = rotation.broadcast_to((*self.alpha.shape[:2], 3, 3)).flatten(start_dim=0, end_dim=1)
         rotation = rotation[self.triangle_indices]
         rotation = rotation.transpose(-2, -1)
         self._rotation = rot_to_quat_batch(rotation)
@@ -352,11 +342,6 @@ class GaussianMeshModel(GaussianModel):
         if update_geometry and self.vertices is not None and self.faces is not None and self.triangle_indices is not None:
             self.update_alpha()
 
-    def update_alpha_triangle(self):
-        """
-        Update alpha values triangle by triangle instead of all at once.
-        """
-    
     def training_setup(self, training_args):
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
