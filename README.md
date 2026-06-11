@@ -193,7 +193,7 @@ python metrics.py -m output/dancer_network/frame_0001 ... --gs_type gs_mesh
 - `gs_mesh` — Gaussians parameterized on a mesh surface (the LMG path; requires a mesh).
 - `gs_flat` — flat Gaussians (one scale ≈ epsilon).
 - `gs_multi_mesh` — multi-mesh variant of `gs_mesh` (use `--meshes`).
-- `gs_flame` — FLAME-model parameterization (requires FLAME files under `games/flame_splatting/FLAME/`).
+- `gs_flame` — FLAME-model parameterization (requires FLAME files under `scene/flame/`).
 - `gs_points` — render-only parameterization of the flat model.
 
 ## Allocation policies (`--alloc_policy`)
@@ -225,20 +225,7 @@ output/
 Entry points live at the root (`train.py`, `render_mesh_splat.py`, `metrics.py`,
 `full_eval.py`, `convert.py`); `arguments/` + `arguments_games/` hold parameter
 groups; `scene/` holds cameras / dataset readers / the Gaussian model /
-`budgeting.py`; `games/` holds the mesh / multi-mesh / FLAME / flat
-parameterizations; `renderer/` holds the rasterizer front ends; `utils/` holds
-shared helpers (including `mesh_utils.py` and `sequence_utils.py`). Dormant
-experimental code is kept under `archive/`.
-
-## Citation
-
-If you find this repository helpful in your research, please consider citing and
-giving a ⭐.
-
-```
-@InProceedings{Sun_2025,
-    author    = {Sun, Yuan-Chun and Chen, Guodong and Kondori, Sam Ziaie and Dasari, Mallesham and Hsu, Cheng-Hsin},
-    title     = {Layered Mesh-Gaussian},
-    year      = {2025},
-}
-```
+`budgeting.py` plus every `gs_type` model class, its readers, the `model_zoo.py`
+dispatch registries, and the `flame/` package; `renderer/` holds the rasterizer
+front ends; `utils/` holds shared helpers (including `mesh_utils.py` and
+`sequence_utils.py`). Dormant experimental code is kept under `archive/`.
