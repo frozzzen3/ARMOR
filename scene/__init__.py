@@ -212,9 +212,8 @@ class Scene:
                 self.gaussians.triangle_indices = scene_info.point_cloud.triangle_indices.cuda() # [YC] add
                 # <<<< [YC] add
         elif initialize_gaussians: # [YC] note: first time training
-            # [YC] note: if using "gs_mesh", the create_from_pcd() 
-            # will use the one defined in mesh-splat/games/scene/gaussian_model_mesh.py
-            # under class GaussianMeshModel(GaussianModel)
+            # [YC] note: if using "gs_mesh", create_from_pcd() dispatches to
+            # scene/gaussian_mesh_model.py (class GaussianMeshModel(GaussianModel))
             self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
 

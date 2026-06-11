@@ -20,8 +20,8 @@ class BasicPointCloud(NamedTuple):
     normals : np.array
 
 
-# Mesh-parameterized point clouds (relocated from the former games/ subpackages).
-# Each is a distinct data structure consumed by the corresponding gs_type model.
+# Mesh-parameterized point clouds (one per mesh-based gs_type model).
+# Each is a distinct data structure consumed by the corresponding model.
 class MeshPointCloud(NamedTuple):
     alpha: torch.Tensor
     points: torch.Tensor

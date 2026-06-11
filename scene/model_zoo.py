@@ -10,8 +10,9 @@
 
 """Dispatch registries for the gs_type model variants and scene loaders.
 
-Replaces the former games/__init__.py and games/scenes/__init__.py after the
-mesh/multi-mesh/FLAME/flat parameterizations were folded into scene/.
+Maps each --gs_type to its model class + optimization params, and each dataset
+kind to its scene-info reader. The mesh/multi-mesh/FLAME/flat parameterizations
+all live under scene/.
 """
 
 from arguments import OptimizationParams
