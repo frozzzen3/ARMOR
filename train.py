@@ -11,9 +11,7 @@
 
 # from pytorch3d.io import load_objs_as_meshes
 
-from itertools import count
 import os
-import json
 import torch
 from random import randint
 from utils.loss_utils import l1_loss, ssim
@@ -44,71 +42,16 @@ from PIL import Image
 import torchvision.transforms as T
 import torchvision.transforms.functional as TF
 
-import numpy as np
 from pathlib import Path
-import re
-import shutil
 
-from pytorch3d.io import load_objs_as_meshes
-from pytorch3d.io import load_ply
-from pytorch3d.renderer import (
-    AmbientLights,
-    RasterizationSettings, 
-    MeshRenderer, 
-    MeshRasterizer,  
-    SoftPhongShader,
-    )
-
-import open3d as o3d
-from pytorch3d.structures import Pointclouds
-from pytorch3d.renderer import (
-    PointsRasterizationSettings,
-    PointsRenderer,
-    PointsRasterizer,
-    AlphaCompositor
-)
-from scene.cameras import convert_camera_from_gs_to_pytorch3d
-from pytorch3d.renderer.blending import BlendParams
-import trimesh
-from pytorch3d.structures import Meshes
-from pytorch3d.renderer import TexturesVertex
-from renderer.mesh_renderer.mesh_utils import ensure_mesh_has_texture
-
-import matplotlib.pyplot as plt
-import matplotlib.cm as cm
-from scene.dataset_readers import (
-    infer_mesh_image_subdir,
-    readCamerasFromTransforms,
-    readColmapCameras,
-)
-from scene.colmap_loader import (
-    read_extrinsics_binary,
-    read_extrinsics_text,
-    read_intrinsics_binary,
-    read_intrinsics_text,
-)
-from scene.budgeting import allocate_splats_from_weights, get_budgeting_policy
-from games.mesh_splatting.scene.temporal_attribute_model import (
-    CompactTemporalAttributeModel,
-    estimate_compact_temporal_storage,
-)
-
-
-# [good to have] loss-informed stop criteria
-LOSS_CONVG_THRESH = 0.01
-
-
+from games.mesh_splatting.scene.temporal_attribute_model import CompactTemporalAttributeModel
 from utils.mesh_utils import (
     infer_mesh_frame_subdir,
     build_precaptured_path,
     resolve_mesh_sequence,
     append_subdir,
     append_policy_subdir,
-    extract_frame_index,
     resolve_canonical_mesh,
-    load_budgeting_trimesh,
-    validate_sequence_topology,
-    sequence_frame_label,
     normalized_frame_time,
     load_textured_mesh,
     load_textured_mesh_for_nvdiffrast,
@@ -118,13 +61,13 @@ from utils.sequence_utils import (
     ensure_canonical_policy_file,
     load_training_background,
     extract_dataset_args,
-    get_total_splats_for_mesh,
-    load_policy_camera_infos,
-    reduce_sequence_weights,
-    default_sequence_policy_path,
     write_temporal_storage_report,
     ensure_sequence_policy_file,
 )
+
+
+# [good to have] loss-informed stop criteria
+LOSS_CONVG_THRESH = 0.01
 
 
 def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,

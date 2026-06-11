@@ -30,9 +30,16 @@ def render(viewpoint_camera, pc : GaussianModel, pipe,
            textured_mesh = None,
            mesh_rasterizer_type = "pytorch3d"):
     """
-    Render the scene. 
-    
-    Background tensor (bg_color) must be on GPU!
+    Render Gaussian splats over a textured-mesh background (the LMG hybrid path).
+
+    The mesh background RGB (``bg_color``) and depth (``bg_depth``) are rasterized
+    on demand by the ``mesh_rasterizer_type`` backend ("pytorch3d" or "nvdiffrast")
+    whenever they are not supplied; pre-rendered tensors can be passed in to skip
+    that work. ``bg_depth`` enables occlusion-aware compositing of splats against
+    the mesh. Tensors must be on GPU.
+
+    Returns a dict with keys: "render", "viewspace_points", "visibility_filter",
+    "radii", "bg_color", "bg_depth".
     """
     
     # print(f"[DEBUG][DEBUG] bg_color: {bg_color}")
