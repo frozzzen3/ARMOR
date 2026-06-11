@@ -29,7 +29,7 @@ from pytorch3d.io import load_objs_as_meshes
 import trimesh
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import TexturesVertex
-from train import load_textured_mesh, load_textured_mesh_for_nvdiffrast
+from utils.mesh_utils import load_textured_mesh, load_textured_mesh_for_nvdiffrast
 from games.mesh_splatting.scene.temporal_attribute_model import CompactTemporalAttributeModel
 
 import json
