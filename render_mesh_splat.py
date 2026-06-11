@@ -23,14 +23,14 @@ from renderer.mesh_splat_renderer import render # [YC] change to mesh_splat_rend
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from games import gaussianModelRender
+from scene.model_zoo import gaussianModelRender
 
 from pytorch3d.io import load_objs_as_meshes
 import trimesh
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import TexturesVertex
 from utils.mesh_utils import load_textured_mesh, load_textured_mesh_for_nvdiffrast
-from games.mesh_splatting.scene.temporal_attribute_model import CompactTemporalAttributeModel
+from scene.temporal_attribute_model import CompactTemporalAttributeModel
 
 import json
 import time

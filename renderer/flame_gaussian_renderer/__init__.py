@@ -14,7 +14,7 @@
 import torch
 import math
 from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianRasterizer
-from games.flame_splatting.scene.gaussian_flame_model import GaussianFlameModel
+from scene.gaussian_flame_model import GaussianFlameModel
 from utils.sh_utils import eval_sh
 
 def flame_render(

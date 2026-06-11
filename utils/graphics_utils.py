@@ -12,12 +12,53 @@
 import torch
 import math
 import numpy as np
-from typing import NamedTuple
+from typing import NamedTuple, Optional
 
 class BasicPointCloud(NamedTuple):
     points : np.array
     colors : np.array
     normals : np.array
+
+
+# Mesh-parameterized point clouds (relocated from the former games/ subpackages).
+# Each is a distinct data structure consumed by the corresponding gs_type model.
+class MeshPointCloud(NamedTuple):
+    alpha: torch.Tensor
+    points: torch.Tensor
+    colors: np.array
+    normals: np.array
+    vertices: np.array
+    faces: np.array
+    transform_vertices_function: object
+    triangles: torch.Tensor
+    triangle_indices: Optional[torch.Tensor] = None
+
+
+class MultiMeshPointCloud(NamedTuple):
+    alpha: torch.Tensor
+    points: torch.Tensor
+    colors: np.array
+    normals: np.array
+    vertices: np.array
+    faces: np.array
+    triangles: torch.Tensor
+
+
+class FLAMEPointCloud(NamedTuple):
+    alpha: torch.Tensor
+    points: torch.Tensor
+    colors: np.array
+    normals: np.array
+    faces: torch.Tensor
+    vertices_init: torch.Tensor
+    flame_model: object
+    transform_vertices_function: object
+    flame_model_shape_init: torch.Tensor
+    flame_model_expression_init: torch.Tensor
+    flame_model_pose_init: torch.Tensor
+    flame_model_neck_pose_init: torch.Tensor
+    flame_model_transl_init: torch.Tensor
+    vertices_enlargement_init: float
 
 def geom_transform_points(points, transf_matrix):
     P, _ = points.shape

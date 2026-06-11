@@ -1,11 +1,11 @@
 from pathlib import Path
-from games.mesh_splatting.scene.gaussian_mesh_model import GaussianMeshModel
+from scene.gaussian_mesh_model import GaussianMeshModel
 from torch import nn
 import torch
 import trimesh
 import numpy as np
 
-from games.mesh_splatting.scene.dataset_readers import get_num_splats_per_triangle
+from scene.mesh_dataset_readers import get_num_splats_per_triangle
 
 from utils.general_utils import inverse_sigmoid, rot_to_quat_batch
 

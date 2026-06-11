@@ -20,7 +20,7 @@ import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from games.multi_mesh_splatting.scene.gaussian_multi_mesh_model import GaussianMultiMeshModel
+from scene.gaussian_multi_mesh_model import GaussianMultiMeshModel
 
 def render_set(model_path, name, iteration, views, gaussians, pipeline, background):
     render_path = os.path.join(model_path, name, "ours_{}".format(iteration), "renders")

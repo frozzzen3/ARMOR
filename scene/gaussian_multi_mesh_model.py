@@ -19,7 +19,7 @@ from torch import nn
 from scene.gaussian_model import GaussianModel
 from utils.general_utils import inverse_sigmoid, rot_to_quat_batch
 from utils.sh_utils import RGB2SH
-from games.multi_mesh_splatting.utils.graphics_utils import MultiMeshPointCloud
+from utils.graphics_utils import MultiMeshPointCloud
 
 
 class GaussianMultiMeshModel(GaussianModel):

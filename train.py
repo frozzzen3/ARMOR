@@ -19,7 +19,7 @@ from utils.loss_utils import l1_loss, ssim
 from renderer.mesh_splat_renderer import render, network_gui
 import sys
 from scene import Scene
-from games import (
+from scene.model_zoo import (
     optimizationParamTypeCallbacks,
     gaussianModel
 )
@@ -44,7 +44,7 @@ import torchvision.transforms.functional as TF
 
 from pathlib import Path
 
-from games.mesh_splatting.scene.temporal_attribute_model import CompactTemporalAttributeModel
+from scene.temporal_attribute_model import CompactTemporalAttributeModel
 from utils.mesh_utils import (
     infer_mesh_frame_subdir,
     build_precaptured_path,

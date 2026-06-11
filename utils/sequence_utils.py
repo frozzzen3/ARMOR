@@ -40,7 +40,7 @@ from scene.colmap_loader import (
     read_intrinsics_text,
 )
 from scene.budgeting import allocate_splats_from_weights, get_budgeting_policy
-from games.mesh_splatting.scene.temporal_attribute_model import (
+from scene.temporal_attribute_model import (
     estimate_compact_temporal_storage,
 )
 from utils.mesh_utils import (

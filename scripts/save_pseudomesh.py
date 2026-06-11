@@ -14,7 +14,7 @@ import sys
 import os
 import torch
 from os import makedirs
-from games.flat_splatting.scene.points_gaussian_model import PointsGaussianModel
+from scene.points_gaussian_model import PointsGaussianModel
 from utils.system_utils import searchForMaxIteration
 from scene.gaussian_model import GaussianModel
 from argparse import ArgumentParser

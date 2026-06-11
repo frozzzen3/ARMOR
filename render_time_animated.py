@@ -22,7 +22,7 @@ import trimesh
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from games.mesh_splatting.scene.gaussian_mesh_model import GaussianMeshModel
+from scene.gaussian_mesh_model import GaussianMeshModel
 
 
 def transform_ficus_sinus(vertices, t, idxs):

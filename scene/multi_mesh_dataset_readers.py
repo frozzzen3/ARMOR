@@ -18,17 +18,17 @@ import torch
 import time
 
 # >>>> [YC] add
-from games.mesh_splatting.scene.dataset_readers \
+from scene.mesh_dataset_readers \
     import (
         get_num_splats_per_triangle,
         get_triangle_average_colors,
         mesh_has_texture_image,
         transform_vertices_function,
     )
-from games.mesh_splatting.utils.graphics_utils import MeshPointCloud
+from utils.graphics_utils import MeshPointCloud
 # <<< [YC] add
 
-from games.multi_mesh_splatting.utils.graphics_utils import MultiMeshPointCloud
+from utils.graphics_utils import MultiMeshPointCloud
 from scene.dataset_readers import (
     readColmapSceneInfo,
     readNerfSyntheticInfo,

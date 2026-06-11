@@ -19,7 +19,7 @@ import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from games import gaussianModelRender
+from scene.model_zoo import gaussianModelRender
 
 from PIL import Image
 import torchvision.transforms as T

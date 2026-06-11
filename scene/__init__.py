@@ -17,8 +17,8 @@ import shutil
 from pathlib import Path
 
 from utils.system_utils import searchForMaxIteration
-from games.scenes import sceneLoadTypeCallbacks
-from games.mesh_splatting.scene.gaussian_mesh_model import GaussianMeshModel
+from scene.model_zoo import sceneLoadTypeCallbacks
+from scene.gaussian_mesh_model import GaussianMeshModel
  
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams

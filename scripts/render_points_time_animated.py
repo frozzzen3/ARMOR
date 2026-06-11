@@ -21,7 +21,7 @@ import torchvision
 from utils.general_utils import safe_state
 from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args
-from games.flat_splatting.scene.points_gaussian_model import PointsGaussianModel
+from scene.points_gaussian_model import PointsGaussianModel
 
 
 def transform_hotdog(triangles, t):
