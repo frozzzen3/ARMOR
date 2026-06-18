@@ -31,7 +31,7 @@ class CompactTemporalAttributeModel(nn.Module):
 
     def __init__(
         self,
-        num_triangles,
+        num_gaussians=None,
         latent_dim=8,
         hidden_dim=64,
         depth=3,
@@ -45,9 +45,19 @@ class CompactTemporalAttributeModel(nn.Module):
         predict_opacity=True,
         predict_color=True,
         lr=1e-3,
+        num_triangles=None,
+        canonical_relative=True,
+        canonical_time=0.0,
     ):
         super().__init__()
-        self.num_triangles = int(num_triangles)
+        # The latent table holds one row per indexed entity. Historically this was
+        # keyed per triangle (same-topology sequences); for variable-topology
+        # sequences it is keyed per persistent Gaussian. `num_triangles` is accepted
+        # for backward compatibility with old checkpoints.
+        num_entities = num_gaussians if num_gaussians is not None else num_triangles
+        if num_entities is None:
+            raise ValueError("CompactTemporalAttributeModel requires num_gaussians (or num_triangles).")
+        self.num_gaussians = int(num_entities)
         self.latent_dim = int(latent_dim)
         self.hidden_dim = int(hidden_dim)
         self.depth = int(depth)
@@ -61,8 +71,15 @@ class CompactTemporalAttributeModel(nn.Module):
         self.predict_opacity = bool(predict_opacity)
         self.predict_color = bool(predict_color)
         self.lr = float(lr)
+        # When True, residuals are measured relative to the canonical time so that the
+        # residual is exactly zero at the canonical frame. This pins the base Gaussian
+        # params to the canonical appearance and forces the temporal model to represent
+        # only the per-frame DELTA (prevents it from absorbing a constant offset that
+        # the base then mirrors, which collapses/saturates the residual).
+        self.canonical_relative = bool(canonical_relative)
+        self.canonical_time = float(canonical_time)
 
-        self.triangle_latent = nn.Embedding(self.num_triangles, self.latent_dim)
+        self.triangle_latent = nn.Embedding(self.num_gaussians, self.latent_dim)
         time_dim = 1 + 2 * self.time_frequencies
         input_dim = self.latent_dim + time_dim + 3
 
@@ -99,7 +116,7 @@ class CompactTemporalAttributeModel(nn.Module):
 
     def config(self):
         return {
-            "num_triangles": self.num_triangles,
+            "num_gaussians": self.num_gaussians,
             "latent_dim": self.latent_dim,
             "hidden_dim": self.hidden_dim,
             "depth": self.depth,
@@ -113,20 +130,33 @@ class CompactTemporalAttributeModel(nn.Module):
             "predict_opacity": self.predict_opacity,
             "predict_color": self.predict_color,
             "lr": self.lr,
+            "canonical_relative": self.canonical_relative,
+            "canonical_time": self.canonical_time,
         }
 
     @property
     def parameter_count(self):
         return sum(p.numel() for p in self.parameters())
 
-    def forward(self, triangle_indices, uvw, frame_time):
-        triangle_indices = triangle_indices.to(dtype=torch.long)
-        uvw = uvw.detach()
+    def _raw_head(self, latent, uvw, frame_time):
         time_emb = sinusoidal_time_embedding(frame_time, self.time_frequencies)
         time_emb = time_emb.to(device=uvw.device, dtype=uvw.dtype).expand(uvw.shape[0], -1)
-        latent = self.triangle_latent(triangle_indices)
-        h = self.backbone(torch.cat([latent, time_emb, uvw], dim=-1))
-        raw = self.head(h)
+        return self.head(self.backbone(torch.cat([latent, time_emb, uvw], dim=-1)))
+
+    def forward(self, indices, uvw, frame_time):
+        indices = indices.to(dtype=torch.long)
+        uvw = uvw.detach()
+        latent = self.triangle_latent(indices)
+        raw = self._raw_head(latent, uvw, frame_time)
+        # Canonical-relative: subtract the canonical-time prediction so the residual is
+        # exactly zero at the canonical frame and only the time-varying delta survives.
+        raw_canon = self._raw_head(latent, uvw, self.canonical_time) if self.canonical_relative else None
+
+        def residual(key, max_d):
+            r = torch.tanh(raw[:, self._slices[key]]) * max_d
+            if raw_canon is not None:
+                r = r - torch.tanh(raw_canon[:, self._slices[key]]) * max_d
+            return r
 
         out = {
             "d_uvw": None,
@@ -135,14 +165,13 @@ class CompactTemporalAttributeModel(nn.Module):
             "d_features_dc": None,
         }
         if "d_uvw" in self._slices:
-            out["d_uvw"] = torch.tanh(raw[:, self._slices["d_uvw"]]) * self.max_d_uvw
+            out["d_uvw"] = residual("d_uvw", self.max_d_uvw)
         if "d_scaling" in self._slices:
-            out["d_scaling"] = torch.tanh(raw[:, self._slices["d_scaling"]]) * self.max_d_scaling
+            out["d_scaling"] = residual("d_scaling", self.max_d_scaling)
         if "d_opacity" in self._slices:
-            out["d_opacity"] = torch.tanh(raw[:, self._slices["d_opacity"]]) * self.max_d_opacity
+            out["d_opacity"] = residual("d_opacity", self.max_d_opacity)
         if "d_features_dc" in self._slices:
-            d_color = torch.tanh(raw[:, self._slices["d_features_dc"]]) * self.max_d_color
-            out["d_features_dc"] = d_color[:, None, :]
+            out["d_features_dc"] = residual("d_features_dc", self.max_d_color)[:, None, :]
         return out
 
     def save(self, path):

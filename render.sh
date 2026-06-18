@@ -3,12 +3,12 @@ set -euo pipefail
 
 GPU_ID="${GPU_ID:-1}"
 DATASET="${DATASET:-data/dancer}"
-OUTPUT="${OUTPUT:-output/dancer_network}"
-MESH_DIR="${MESH_DIR:-data/dancer/mesh_dynamic}"
+OUTPUT="${OUTPUT:-output/dancer_test}"
+MESH_DIR="${MESH_DIR:-data/dancer/meshes_distorted}"
 MESH_PREFIX="${MESH_PREFIX:-dancer_}"
 MESH_EXT="${MESH_EXT:-obj}"
 START_FRAME="${START_FRAME:-1}"
-END_FRAME="${END_FRAME:-10}"
+END_FRAME="${END_FRAME:-2}"
 GS_TYPE="${GS_TYPE:-gs_mesh}"
 MESH_TYPE="${MESH_TYPE:-sugar}"
 TOTAL_SPLATS="${TOTAL_SPLATS:-100000}"
@@ -18,17 +18,32 @@ SEQUENCE_POLICY_PATH="${SEQUENCE_POLICY_PATH:-${OUTPUT}/sequence_policy/${ALLOC_
 TEMPORAL_ATTRIBUTES="${TEMPORAL_ATTRIBUTES:-1}"
 TEMPORAL_ATTR_CHECKPOINT="${TEMPORAL_ATTR_CHECKPOINT:-${OUTPUT}/temporal_attr_model.pth}"
 COMPACT_TEMPORAL_RENDER="${COMPACT_TEMPORAL_RENDER:-${TEMPORAL_ATTRIBUTES}}"
+# Variable-topology render: set VARIABLE_TOPOLOGY=1 to re-bind the persistent base
+# checkpoint to each frame's mesh from cached bindings written by training. Default off.
+VARIABLE_TOPOLOGY="${VARIABLE_TOPOLOGY:-1}"
+BINDING_CACHE_DIR="${BINDING_CACHE_DIR:-${OUTPUT}/bindings}"
 BASE_MODEL_PATH="${BASE_MODEL_PATH:-${OUTPUT}/frame_$(printf "%04d" "${CANONICAL_FRAME:-${START_FRAME}}")}"
 PRECAPTURED_MESH_IMG_PATH="${PRECAPTURED_MESH_IMG_PATH:-${PRECATURED_MESH_IMG_PATH:-${DATASET}/mesh}}"
 MESH_RASTERIZER_TYPE="${MESH_RASTERIZER_TYPE:-pytorch3d}"
 ITERATION="${ITERATION:-}"
 CANONICAL_FRAME="${CANONICAL_FRAME:-${START_FRAME}}"
 CANONICAL_FRAME_ID="$(printf "%04d" "${CANONICAL_FRAME}")"
-CANONICAL_ITERATIONS="${CANONICAL_ITERATIONS:-1000}"
-TEMPORAL_ITERATIONS="${TEMPORAL_ITERATIONS:-1000}"
+CANONICAL_ITERATIONS="${CANONICAL_ITERATIONS:-5000}"
+TEMPORAL_ITERATIONS="${TEMPORAL_ITERATIONS:-5000}"
 SKIP_TRAIN="${SKIP_TRAIN:-1}"
 OCCLUSION="${OCCLUSION:-1}"
 WHITE_BACKGROUND="${WHITE_BACKGROUND:-1}"
+
+# Render directly from a self-contained training bundle (sequence_bundle/): point
+# SEQUENCE_BUNDLE at it and the base checkpoint, bindings, and temporal model are all
+# resolved from that one folder. Default uses <OUTPUT>/sequence_bundle if present.
+SEQUENCE_BUNDLE="${SEQUENCE_BUNDLE:-${OUTPUT}/sequence_bundle}"
+if [[ -d "${SEQUENCE_BUNDLE}" ]]; then
+  echo "[INFO] Using self-contained sequence bundle: ${SEQUENCE_BUNDLE}"
+  BASE_MODEL_PATH="${SEQUENCE_BUNDLE}/base"
+  BINDING_CACHE_DIR="${SEQUENCE_BUNDLE}/bindings"
+  TEMPORAL_ATTR_CHECKPOINT="${SEQUENCE_BUNDLE}/temporal_attr_model.pth"
+fi
 
 occlusion_args=()
 if [[ "${OCCLUSION}" == "1" || "${OCCLUSION}" == "true" ]]; then
@@ -63,6 +78,13 @@ fi
 compact_render=0
 if [[ "${COMPACT_TEMPORAL_RENDER}" == "1" || "${COMPACT_TEMPORAL_RENDER}" == "true" ]]; then
   compact_render=1
+fi
+
+binding_args=()
+if [[ "${VARIABLE_TOPOLOGY}" == "1" || "${VARIABLE_TOPOLOGY}" == "true" ]]; then
+  # variable-topology implies the compact base+bindings+temporal render path
+  compact_render=1
+  binding_args+=(--binding_cache_dir "${BINDING_CACHE_DIR}")
 fi
 
 use_frame_dirs=0
@@ -153,6 +175,7 @@ for frame in $(seq "${START_FRAME}" "${END_FRAME}"); do
     "${occlusion_args[@]}" \
     "${white_background_args[@]}" \
     "${temporal_args[@]}" \
+    "${binding_args[@]}" \
     --total_splats "${TOTAL_SPLATS}" \
     --alloc_policy "${ALLOC_POLICY}" \
     --texture_obj_path "${mesh_path}" \

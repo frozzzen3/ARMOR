@@ -3,16 +3,25 @@ set -e
 
 GPU_ID="${GPU_ID:-1}"
 DATASET="${DATASET:-data/dancer}"
-OUTPUT="${OUTPUT:-output/dancer_seq}"
-MESH_DIR="${MESH_DIR:-data/dancer/mesh_dynamic}"
+OUTPUT="${OUTPUT:-output/dancer_test}"
+MESH_DIR="${MESH_DIR:-data/dancer/meshes_distorted}"
 MESH_PREFIX="${MESH_PREFIX:-dancer_}"
 START_FRAME="${START_FRAME:-1}"
-END_FRAME="${END_FRAME:-10}"
+END_FRAME="${END_FRAME:-2}"
 TOTAL_SPLATS="${TOTAL_SPLATS:-100000}"
 ALLOC_POLICY="${ALLOC_POLICY:-distortion}"
 SEQUENCE_WEIGHT_REDUCTION="${SEQUENCE_WEIGHT_REDUCTION:-max}"
 POLICY_PATH="${POLICY_PATH:-${OUTPUT}/sequence_policy/${ALLOC_POLICY}_sequence_${SEQUENCE_WEIGHT_REDUCTION}_${TOTAL_SPLATS}.npy}"
 START_MESH="${MESH_DIR}/${MESH_PREFIX}$(printf "%04d" "${START_FRAME}").obj"
+# Variable-topology mode: set VARIABLE_TOPOLOGY=1 when per-frame meshes have
+# different topology. The sequence policy is then based on the first frame only.
+VARIABLE_TOPOLOGY="${VARIABLE_TOPOLOGY:-1}"
+TRACK_METHOD="${TRACK_METHOD:-laplacian}"
+
+vartopo_args=()
+if [[ "${VARIABLE_TOPOLOGY}" == "1" || "${VARIABLE_TOPOLOGY}" == "true" ]]; then
+  vartopo_args+=(--variable_topology --track_method "${TRACK_METHOD}")
+fi
 
 echo "Running sequence-aware warmup for ${START_MESH} frames ${START_FRAME}-${END_FRAME}"
 
@@ -32,6 +41,7 @@ python train.py --eval \
   --alloc_policy "${ALLOC_POLICY}" \
   --policy_path "${POLICY_PATH}" \
   --sequence_weight_reduction "${SEQUENCE_WEIGHT_REDUCTION}" \
+  "${vartopo_args[@]}" \
   --precaptured_mesh_img_path "${DATASET}/mesh" \
   -w \
   --iteration 10

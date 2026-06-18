@@ -255,7 +255,8 @@ def write_temporal_storage_report(gaussians, temporal_model, num_frames, report_
     return report
 
 
-def ensure_sequence_policy_file(base_args, model_params, mesh_paths, requested_policy_path=""):
+def ensure_sequence_policy_file(base_args, model_params, mesh_paths, requested_policy_path="",
+                                first_frame_only=False):
     first_run_args = build_frame_run_args(base_args, mesh_paths[0], use_subdir=False)
     dataset = extract_dataset_args(model_params, first_run_args)
     reduction = base_args.sequence_weight_reduction
@@ -265,12 +266,20 @@ def ensure_sequence_policy_file(base_args, model_params, mesh_paths, requested_p
         print(f"[INFO] Using existing sequence policy: {requested_policy_path}")
         return requested_policy_path
 
-    print(f"[INFO] Computing sequence-aware allocation over {len(mesh_paths)} mesh frames.")
+    # When frames have differing topology (variable-topology mode) the allocation
+    # cannot be aggregated across frames, so base the policy on the first frame only.
+    # Later frames are handled by per-frame re-binding, so this does not affect them.
+    policy_frames = mesh_paths[:1] if first_frame_only else mesh_paths
+    if first_frame_only and len(mesh_paths) > 1:
+        print(f"[INFO] Variable topology: basing sequence-aware policy on the first frame "
+              f"({Path(mesh_paths[0]).name}) only; later frames are handled by re-binding.")
+
+    print(f"[INFO] Computing sequence-aware allocation over {len(policy_frames)} mesh frame(s).")
     reference_faces = None
     frame_weights = []
     num_triangles = None
 
-    for mesh_path in mesh_paths:
+    for mesh_path in policy_frames:
         run_args = build_frame_run_args(base_args, mesh_path, use_subdir=False)
         frame_dataset = extract_dataset_args(model_params, run_args)
         mesh_scene = load_budgeting_trimesh(str(mesh_path))

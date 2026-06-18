@@ -48,6 +48,10 @@ class GaussianMeshModel(GaussianModel):
         # >>>> [YC] add
         self.triangle_indices = None
         # <<<< [YC] add
+        # When True, temporal residuals are keyed on persistent Gaussian identity
+        # (one latent per Gaussian) instead of per triangle. Set by the
+        # variable-topology training path so dynamics survive re-binding.
+        self.temporal_per_gaussian = False
         self.clear_temporal_attributes(update_geometry=False)
 
     @property
@@ -212,6 +216,167 @@ class GaussianMeshModel(GaussianModel):
         self.update_alpha()
         self.prepare_scaling_rot()
 
+    def retrack_to_mesh(self, vertices, faces, tracker=None, reset_uvw_state=True):
+        """
+        Re-bind the persistent Gaussian set to a new mesh of *arbitrary* topology.
+
+        Unlike :meth:`rebind_to_mesh` (which requires identical topology), this
+        recomputes every Gaussian's triangle assignment and logical coordinates by
+        tracking the surface across the topology change:
+
+          1. (optional) non-rigidly register the previous mesh onto the new one and
+             warp the current Gaussian centers through that deformation field;
+          2. closest-point snap the warped centers onto the new surface to recover a
+             face id + barycentric coordinates;
+          3. re-seed ``_uvw`` from the projected barycentric and reset its optimizer
+             state (the parameter value jumps).
+
+        Gaussian identity (row index), SH features, opacity and per-Gaussian scale
+        are preserved; the mesh is used as a fixed per-frame scaffold (vertices are
+        stored as a plain buffer, not optimized).
+        """
+        from utils.mesh_utils import (
+            register_mesh_nonrigid,
+            register_mesh_laplacian,
+            project_points_to_mesh,
+        )
+
+        if tracker is None:
+            tracker = {"method": "closest_point", "rigid_prealign": False}
+        method = tracker.get("method", "laplacian")
+
+        if not isinstance(vertices, torch.Tensor):
+            vertices = torch.tensor(vertices)
+        if not isinstance(faces, torch.Tensor):
+            faces = torch.tensor(faces)
+        new_vertices = vertices.detach().to(device="cuda", dtype=torch.float32)
+        new_faces = faces.detach().to(device="cuda", dtype=torch.long)
+
+        with torch.no_grad():
+            # 1. warp the previous (temporal-free) Gaussian centers towards the new frame
+            deformed_src = None
+            if method == "laplacian":
+                deformed_src = register_mesh_laplacian(
+                    self.vertices.detach(),
+                    self.faces.detach(),
+                    new_vertices,
+                    new_faces,
+                    rigid_prealign=tracker.get("rigid_prealign", True),
+                )
+            elif method in ("nricp_amberg", "nricp_sumner"):
+                deformed_src = register_mesh_nonrigid(
+                    self.vertices.detach(),
+                    self.faces.detach(),
+                    new_vertices,
+                    new_faces,
+                    method=method,
+                    rigid_prealign=tracker.get("rigid_prealign", True),
+                    steps=tracker.get("steps", None),
+                )
+            if method != "closest_point" and deformed_src is None:
+                print("[WARN] retrack_to_mesh: non-rigid registration unavailable; "
+                      "falling back to closest-point warp for this frame.")
+            if deformed_src is None:
+                # closest-point tracker (or registration fallback): snap the previous
+                # centers directly onto the new surface.
+                warped_xyz = self._xyz.detach()
+            else:
+                old_face_tris = deformed_src[self.faces[self.triangle_indices]]  # [G,3,3]
+                warped_xyz = torch.bmm(self.alpha.unsqueeze(1), old_face_tris).squeeze(1)
+
+            # 2. install the new scaffold as fixed buffers (no vertex optimization)
+            self.vertices = new_vertices
+            self.faces = new_faces
+            self.triangles = self.vertices[self.faces]
+
+            # 3. snap onto the new surface -> face id + barycentric
+            face_id, bary, _ = project_points_to_mesh(warped_xyz, new_vertices, new_faces)
+            self.triangle_indices = face_id
+
+            # 4. re-seed logical coordinates from the projected barycentric
+            self._uvw.data.copy_(self._surface_alpha_to_raw_uvw(bary.to(torch.float32)))
+
+        if reset_uvw_state:
+            self._reset_optimizer_state("uvw")
+
+        self.update_alpha()
+        self.prepare_scaling_rot()
+
+    def binding_state(self):
+        """Return the compact per-frame binding produced by re-tracking.
+
+        Only the lightweight, frame-specific quantities are returned: the triangle
+        assignment and the logical coordinates. Appearance / opacity / scale stay
+        in the shared persistent base and time-variation is handled by the temporal
+        model, so caching just this is enough to reproduce a frame at render time.
+        """
+        return {
+            "triangle_indices": self.triangle_indices.detach().cpu().clone(),
+            "uvw": self._uvw.detach().cpu().clone(),
+            # scale and opacity are geometry-coupled (per-frame face sizes / coverage),
+            # so they are cached per frame and reproduced exactly rather than squeezed
+            # through the clamped temporal model. Both are tiny (G x 1).
+            "scale": self._scale.detach().cpu().clone(),
+            "opacity": self._opacity.detach().cpu().clone(),
+            "num_gaussians": int(self._uvw.shape[0]),
+        }
+
+    def apply_cached_binding(self, vertices, faces, triangle_indices, uvw, scale=None, opacity=None):
+        """Restore a cached per-frame binding for variable-topology rendering.
+
+        Installs the frame mesh as a fixed scaffold and restores the tracked
+        triangle assignment and logical coordinates, then recomputes geometry.
+        Appearance / opacity / scale remain as the loaded persistent base; temporal
+        residuals are applied separately by :meth:`apply_temporal_attributes`.
+        """
+        if not isinstance(vertices, torch.Tensor):
+            vertices = torch.tensor(vertices)
+        if not isinstance(faces, torch.Tensor):
+            faces = torch.tensor(faces)
+        self.vertices = vertices.detach().to(device="cuda", dtype=torch.float32)
+        self.faces = faces.detach().to(device="cuda", dtype=torch.long)
+        self.triangle_indices = torch.as_tensor(triangle_indices, dtype=torch.long, device="cuda")
+        self._uvw = nn.Parameter(torch.as_tensor(uvw, dtype=torch.float32, device="cuda"))
+        self._alpha = self._uvw
+        if scale is not None:
+            self._scale = nn.Parameter(torch.as_tensor(scale, dtype=torch.float32, device="cuda"))
+        if opacity is not None:
+            self._opacity = nn.Parameter(torch.as_tensor(opacity, dtype=torch.float32, device="cuda"))
+        self.triangles = self.vertices[self.faces]
+        self.update_alpha()
+        self.prepare_scaling_rot()
+
+    def freeze_base_appearance(self):
+        """Stop optimizing the shared base SH color (features) so that per-frame color
+        variation is carried by the compact temporal model.
+
+        Only the heavy, slowly-varying SH features are frozen+shared (that is the storage
+        win). The cheap, strongly per-frame-varying attributes -- binding (`_uvw` /
+        triangle indices) and the geometry-coupled `_scale` / `_opacity` (face sizes and
+        coverage differ per frame) -- stay trainable and are cached per frame, so they are
+        reproduced exactly at render instead of being squeezed through the temporal
+        model's clamps.
+        """
+        if getattr(self, "optimizer", None) is None:
+            return
+        frozen = {"f_dc", "f_rest"}
+        for group in self.optimizer.param_groups:
+            if group.get("name") in frozen:
+                group["lr"] = 0.0
+
+    def _reset_optimizer_state(self, group_name):
+        """Drop the Adam moments for a named optimizer group so it restarts clean.
+
+        Used after re-seeding ``_uvw`` at a topology change: the parameter value
+        jumps, so its stale exp_avg / exp_avg_sq would fight the new value.
+        """
+        if getattr(self, "optimizer", None) is None:
+            return
+        for group in self.optimizer.param_groups:
+            if group.get("name") == group_name:
+                for param in group["params"]:
+                    self.optimizer.state.pop(param, None)
+
     def _decode_uvw(self, include_temporal=True):
         raw = self._uvw
         if include_temporal and self.temporal_d_uvw is not None:
@@ -327,7 +492,11 @@ class GaussianMeshModel(GaussianModel):
             self.clear_temporal_attributes()
             return
         base_uvw = self._decode_uvw(include_temporal=False)
-        deltas = temporal_model(self.triangle_indices, base_uvw, frame_time)
+        if self.temporal_per_gaussian:
+            indices = torch.arange(self._uvw.shape[0], device=self._uvw.device)
+        else:
+            indices = self.triangle_indices
+        deltas = temporal_model(indices, base_uvw, frame_time)
         self.temporal_d_uvw = deltas.get("d_uvw")
         self.temporal_d_scaling = deltas.get("d_scaling")
         self.temporal_d_opacity = deltas.get("d_opacity")
@@ -342,11 +511,13 @@ class GaussianMeshModel(GaussianModel):
         if update_geometry and self.vertices is not None and self.faces is not None and self.triangle_indices is not None:
             self.update_alpha()
 
-    def training_setup(self, training_args):
+    def training_setup(self, training_args, optimize_vertices=True):
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
-        l_params = [
-            {'params': [self.vertices], 'lr': training_args.vertices_lr, "name": "vertices"},
+        l_params = []
+        if optimize_vertices:
+            l_params.append({'params': [self.vertices], 'lr': training_args.vertices_lr, "name": "vertices"})
+        l_params += [
             {'params': [self._uvw], 'lr': training_args.alpha_lr, "name": "uvw"},
             {'params': [self._features_dc], 'lr': training_args.feature_lr, "name": "f_dc"},
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},

@@ -11,6 +11,14 @@ allocation, this fork adds:
 - **Dynamic mesh sequences.** Train and render over a sequence of per-frame
   meshes (`--mesh_start` / `--mesh_end`) that share topology, with a canonical
   frame plus per-frame fine-tuning.
+- **Variable-topology sequences (`--variable_topology`).** When each frame is
+  meshed independently (different vertex/face counts), keep a single persistent
+  set of Gaussians and re-bind them to every frame's mesh by register-then-snap
+  tracking (`--track_method` ∈ {`laplacian` (default, robust), `nricp_amberg`,
+  `nricp_sumner`, `closest_point`}).
+  Gaussian identity and the per-Gaussian temporal residuals persist across the
+  topology changes; the input meshes are used as a fixed per-frame scaffold (not
+  optimized). No consistent-topology preprocessing required.
 - **Sequence-aware allocation.** A single splat budget is allocated once across
   the whole sequence by reducing per-frame budgeting weights
   (`--sequence_weight_reduction` ∈ {`mean`, `max`, `mean_max`}), so the layout
@@ -101,6 +109,29 @@ CUDA_VISIBLE_DEVICES=1 python train.py --eval \
   --precaptured_mesh_img_path data/dancer/mesh -w --iteration 1000
 ```
 
+**Variable-topology 4D (per-frame meshes differ).** Add `--variable_topology`
+(optionally `--track_method`). Training keeps a persistent Gaussian set, re-binds
+it to each frame by register-then-snap tracking, and writes a compact per-frame
+binding cache to `<model_path>/bindings/frame_XXXX.pt`. To render, point the
+compact path at that cache (the persistent base lives in the canonical frame dir):
+
+```bash
+# train
+... python train.py ... --mesh_start 1 --mesh_end 10 --canonical_frame 1 \
+  --variable_topology --track_method nricp_amberg \
+  --temporal_attributes ...
+
+# render (per frame): base checkpoint + cached binding + temporal residuals
+... python render_mesh_splat.py -s data/dancer -m output/dancer/frame_0005 \
+  --load_model_path output/dancer/frame_0001 \
+  --binding_cache_dir output/dancer/bindings \
+  --texture_obj_path data/dancer/mesh_dynamic/dancer_0005.obj \
+  --temporal_attributes --temporal_attr_checkpoint output/dancer/temporal_attr_model.pth \
+  --mesh_start 1 --mesh_end 10 --gs_type gs_mesh -w
+```
+
+Or drive the whole sequence with `VARIABLE_TOPOLOGY=1 bash render.sh`.
+
 **Static (single mesh).** Omit `--mesh_start`/`--mesh_end` (and the temporal
 flags). Use `--total_splats` for an absolute budget or `--budget_per_tri` for a
 per-triangle multiplier.
@@ -169,6 +200,9 @@ python metrics.py -m output/dancer_network/frame_0001 ... --gs_type gs_mesh
 | `--sequence_weight_reduction`  | `mean`, `max`, or `mean_max` over per-frame weights      | `max`   |
 | `--recompute_sequence_policy`  | Recompute the sequence policy even if cached             | False   |
 | `--strict_sequence_topology`   | Require identical face ordering across frames            | False   |
+| `--variable_topology`          | Allow per-frame topology changes; persistent Gaussians re-bound by tracking | False |
+| `--track_method`               | Re-binding tracker: `laplacian`, `nricp_amberg`, `nricp_sumner`, `closest_point` | `laplacian` |
+| `--track_rigid_prealign`       | Rigid ICP pre-align before non-rigid registration        | True    |
 | `--temporal_attributes`        | Enable the compact temporal attribute module             | False   |
 | `--temporal_attr_width/_depth/_latent_dim` | MLP width / depth / per-triangle latent size | 64 / 3 / 8 |
 | `--temporal_attr_lr`           | Temporal module learning rate                            | 1e-3    |

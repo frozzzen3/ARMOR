@@ -29,7 +29,7 @@ from pytorch3d.io import load_objs_as_meshes
 import trimesh
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import TexturesVertex
-from utils.mesh_utils import load_textured_mesh, load_textured_mesh_for_nvdiffrast
+from utils.mesh_utils import load_textured_mesh, load_textured_mesh_for_nvdiffrast, infer_mesh_frame_subdir
 from scene.temporal_attribute_model import CompactTemporalAttributeModel
 
 import json
@@ -212,7 +212,22 @@ def render_set(gs_type, model_path, name, iteration, views, gaussians, pipeline,
                 # <<<< [YC] add for debug images
             if cached_bg_depth_path.exists():
                 bg_depth = torch.load(cached_bg_depth_path).unsqueeze(0).to("cuda")
-        
+
+        # Fallback: if no precaptured background was found, render the current frame's
+        # textured mesh as the background (mirrors training's load_training_background).
+        # Without this, the following frames composite the Gaussians over an empty
+        # background and look sparse even though the GS are identical to training.
+        if gs_type == "gs_mesh" and (bg is None or bg_depth is None):
+            fallback_pkg = render(view, gaussians, pipeline,
+                                  bg_color=None, bg_depth=None,
+                                  textured_mesh=textured_mesh,
+                                  mesh_background_color=background,
+                                  mesh_rasterizer_type=mesh_rasterizer_type)
+            if bg is None:
+                bg = fallback_pkg["bg_color"].detach()
+            if bg_depth is None:
+                bg_depth = fallback_pkg["bg_depth"].detach()
+
         # [DONE] add pure GS renderer back here
         if gs_type == "gs":
             # Pure GS rendering without textured mesh
@@ -279,6 +294,7 @@ def render_sets(gs_type: str, dataset : ModelParams, iteration : int, pipeline :
                 mesh_start: int = None,
                 mesh_end: int = None,
                 load_model_path: str = "",
+                binding_cache_dir: str = "",
                 # <<<< [YC] add
                 ):
     render_timer_start = time.time()
@@ -295,14 +311,47 @@ def render_sets(gs_type: str, dataset : ModelParams, iteration : int, pipeline :
             scene_dataset.model_path = load_model_path
             print(f"[INFO] Render:: loading base checkpoint from {load_model_path}")
 
+        # Resolve a cached variable-topology binding for this frame, if available.
+        binding_cache_path = None
+        if binding_cache_dir and gs_type == "gs_mesh":
+            subdir = infer_mesh_frame_subdir(texture_obj_path)
+            if subdir is not None:
+                candidate = Path(binding_cache_dir) / f"{subdir}.pt"
+                if candidate.exists():
+                    binding_cache_path = candidate
+
+        scene_policy_path = policy_path
+        if binding_cache_path is not None:
+            # The frame mesh is only a scaffold (the persistent base is re-bound from the
+            # cached binding), so the per-frame point cloud is just needed for its
+            # vertices/faces. Use cheap uniform sampling matching this frame's own
+            # topology instead of a canonical policy that would overflow on a different
+            # triangle count.
+            scene_dataset.total_splats = None
+            scene_dataset.alloc_policy = "uniform"
+            scene_policy_path = ""
+
         # [BUG] trace from here to see how ply and policy are loaded
         scene = Scene(scene_dataset, gaussians,
                       load_iteration=iteration, shuffle=False,
-                      policy_path=policy_path,
+                      policy_path=scene_policy_path,
                       texture_obj_path=texture_obj_path,
                       textured_mesh=textured_mesh
                       )
-        if load_model_path and gs_type == "gs_mesh" and hasattr(gaussians, "rebind_to_mesh"):
+
+        if binding_cache_path is not None and hasattr(gaussians, "apply_cached_binding"):
+            # Variable-topology compact render: persistent base + cached per-frame
+            # binding (the mesh tracking) + temporal residuals keyed on Gaussian id.
+            cached = torch.load(binding_cache_path, map_location="cuda")
+            gaussians.apply_cached_binding(
+                scene.point_cloud.vertices, scene.point_cloud.faces,
+                cached["triangle_indices"], cached["uvw"],
+                scale=cached.get("scale"), opacity=cached.get("opacity"),
+            )
+            gaussians.point_cloud = scene.point_cloud
+            gaussians.temporal_per_gaussian = True
+            print(f"[INFO] Render:: applied cached variable-topology binding {binding_cache_path}")
+        elif load_model_path and gs_type == "gs_mesh" and hasattr(gaussians, "rebind_to_mesh"):
             gaussians.rebind_to_mesh(scene.point_cloud.vertices, scene.point_cloud.faces)
             gaussians.point_cloud = scene.point_cloud
             print(f"[INFO] Render:: rebound base checkpoint to mesh {texture_obj_path}")
@@ -414,6 +463,11 @@ if __name__ == "__main__":
                         help="End frame index for normalizing temporal render time")
     parser.add_argument("--load_model_path", type=str, default="",
                         help="Optional model path to load checkpoint from while writing renders to -m/--model_path")
+    parser.add_argument("--binding_cache_dir", type=str, default="",
+                        help="Directory of cached per-frame bindings (frame_XXXX.pt) written by "
+                             "variable-topology training. When set, each frame's persistent base "
+                             "checkpoint is re-bound to the frame mesh from its cached binding "
+                             "instead of via same-topology rebind_to_mesh.")
     
     
     args = get_combined_args(parser) # get args from both command line and stored file
@@ -445,5 +499,6 @@ if __name__ == "__main__":
                 mesh_start=args.mesh_start,
                 mesh_end=args.mesh_end,
                 load_model_path=args.load_model_path,
+                binding_cache_dir=args.binding_cache_dir,
                 # <<<< [YC] add
                 )

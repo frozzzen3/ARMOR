@@ -2,9 +2,9 @@
 set -euo pipefail
 
 GPU_ID="${GPU_ID:-0}"
-OUTPUT="${OUTPUT:-output/dancer_network}"
+OUTPUT="${OUTPUT:-output/dancer_test}"
 START_FRAME="${START_FRAME:-1}"
-END_FRAME="${END_FRAME:-10}"
+END_FRAME="${END_FRAME:-2}"
 GS_TYPE="${GS_TYPE:-gs_mesh}"
 
 model_paths=()
