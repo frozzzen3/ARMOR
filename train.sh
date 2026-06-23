@@ -7,7 +7,7 @@ OUTPUT="${OUTPUT:-output/dancer_test}"
 MESH_DIR="${MESH_DIR:-data/dancer/meshes_distorted}"
 MESH_PREFIX="${MESH_PREFIX:-dancer_}"
 START_FRAME="${START_FRAME:-1}"
-END_FRAME="${END_FRAME:-2}"
+END_FRAME="${END_FRAME:-3}"
 TOTAL_SPLATS="${TOTAL_SPLATS:-100000}"
 ALLOC_POLICY="${ALLOC_POLICY:-distortion}"
 SEQUENCE_WEIGHT_REDUCTION="${SEQUENCE_WEIGHT_REDUCTION:-max}"
@@ -69,7 +69,7 @@ CUDA_VISIBLE_DEVICES="${GPU_ID}" python train.py --eval \
   --mesh_start "${START_FRAME}" \
   --mesh_end "${END_FRAME}" \
   --canonical_frame "${START_FRAME}" \
-  --temporal_iterations 1000 \
+  --temporal_iterations 10000 \
   --mesh_type sugar \
   --gs_type gs_mesh \
   --debugging \
@@ -82,4 +82,4 @@ CUDA_VISIBLE_DEVICES="${GPU_ID}" python train.py --eval \
   "${temporal_args[@]}" \
   "${vartopo_args[@]}" \
   --precaptured_mesh_img_path "${DATASET}/mesh" \
-  -w --iteration 1000
+  -w --iteration 10000

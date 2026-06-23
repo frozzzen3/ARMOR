@@ -117,12 +117,21 @@ def tvm_warped_centers(deformed_path, source_path, gaussians, device="cuda", tol
         src_surface = torch.bmm(alpha, src_r[gtri]).squeeze(1)
         ref_surface = torch.bmm(alpha, gaussians.triangles[tri_idx]).squeeze(1)
         max_err = torch.max(torch.abs(src_surface - ref_surface)).item()
-        if max_err > tol:
+        # `not (max_err <= tol)` also catches NaN: a corrupted binding (NaN alpha
+        # from an earlier degenerate-face projection) makes max_err NaN, and a bare
+        # `max_err > tol` is False for NaN, which would let the garbage through.
+        if not (max_err <= tol):
             print(f"[WARN] TVM warp: source raw mesh does not reproduce bound surface "
-                  f"(max err {max_err:.4g} > {tol}); face order/frame mismatch, falling back.")
+                  f"(max err {max_err:.4g} vs tol {tol}); face order/frame mismatch or "
+                  f"corrupted binding, falling back.")
             return None
 
-        return torch.bmm(alpha, dfm_r[gtri]).squeeze(1)         # [G,3] warped centers
+        warped = torch.bmm(alpha, dfm_r[gtri]).squeeze(1)       # [G,3] warped centers
+        if not torch.isfinite(warped).all():
+            print("[WARN] TVM warp: warped centers contain non-finite values "
+                  "(corrupted binding); falling back.")
+            return None
+        return warped
     except Exception as exc:  # noqa: BLE001
         print(f"[WARN] tvm_warped_centers failed ({exc}); falling back.")
         return None
@@ -153,7 +162,7 @@ class TvmTracker:
             if idx is not None:
                 self.frame_to_path[idx] = Path(p)
         self.indices = sorted(self.frame_to_path)
-        self._tracked = False
+        self._tracked_pairs = set()
 
     # ------------------------------------------------------------------ helpers
     def _run(self, cmd, cwd, desc):
@@ -174,12 +183,17 @@ class TvmTracker:
                 link.unlink()
             os.symlink(path.resolve(), link)
 
-    def _write_config(self):
+    def _write_config(self, first=None, last=None):
+        """Write the ARAP config. With `first`/`last` the tracking range is restricted
+        to that span (used for per-pair tracking); otherwise the whole frame range is
+        used. The config is named per-range so concurrent/sequential pairs don't clobber."""
         self.work_dir.mkdir(parents=True, exist_ok=True)
+        first = self.indices[0] if first is None else int(first)
+        last = self.indices[-1] if last is None else int(last)
         text = self.config_template.read_text()
         overrides = {
-            "firstIndex": self.indices[0],
-            "lastIndex": self.indices[-1],
+            "firstIndex": first,
+            "lastIndex": last,
             "inDir": str(self.data_dir),
             "outDir": str(self.out_dir),
             "fileNamePrefix": self.prefix,
@@ -190,7 +204,7 @@ class TvmTracker:
             text, n = re.subn(rf"<{tag}>.*?</{tag}>", f"<{tag}>{val}</{tag}>", text, flags=re.S)
             if n == 0:  # tag absent in template -> insert before close
                 text = text.replace("</Config>", f"  <{tag}>{val}</{tag}>\n</Config>")
-        cfg = self.work_dir / "config.xml"
+        cfg = self.work_dir / f"config_{first:03d}_{last:03d}.xml"
         cfg.write_text(text)
         return cfg
 
@@ -200,26 +214,26 @@ class TvmTracker:
         return base + [s, t, str(self.data_dir), str(self.out_dir), str(self.deformed_dir)]
 
     # ------------------------------------------------------------------ pipeline
-    def ensure_tracking(self):
-        """Run the (expensive) volume tracking once over the whole frame range.
-        Cached: if per-frame centers already exist, skip."""
-        if self._tracked:
-            return True
-        existing = list(self.out_dir.glob(f"{self.prefix}res_*.xyz"))
-        if len(existing) >= len(self.indices):
-            self._tracked = True
+    def track_pair(self, s, t):
+        """Run the volume tracking over just the [s, t] span (two frames), right before
+        re-binding that pair -- instead of tracking the whole range once up front. Cached
+        per-pair in-memory so a repeated deform() of the same pair doesn't re-track."""
+        s, t = int(s), int(t)
+        first, last = min(s, t), max(s, t)
+        key = (first, last)
+        if key in self._tracked_pairs:
             return True
         try:
             if not self.client_dll.exists():
                 raise FileNotFoundError(f"Client.dll not found at {self.client_dll}")
             self._stage_meshes()
-            cfg = self._write_config()
+            cfg = self._write_config(first=first, last=last)
             self._run([self.dotnet, str(self.client_dll), str(cfg)],
-                      cwd=self.arap_dir, desc="ARAP Client (volume tracking)")
-            self._tracked = True
+                      cwd=self.arap_dir, desc=f"ARAP Client (volume tracking {first}->{last})")
+            self._tracked_pairs.add(key)
             return True
         except Exception as exc:  # noqa: BLE001
-            print(f"[WARN] TvmTracker.ensure_tracking failed ({exc})")
+            print(f"[WARN] TvmTracker.track_pair({s},{t}) failed ({exc})")
             return False
 
     def deform(self, s, t):
@@ -228,7 +242,7 @@ class TvmTracker:
         out_obj = self.deformed_dir / "output" / f"deformed_{int(s):03d}_{int(t):03d}.obj"
         if out_obj.exists():
             return out_obj
-        if not self.ensure_tracking():
+        if not self.track_pair(s, t):
             return None
         try:
             self._run([sys.executable, str(self.get_transform_py),

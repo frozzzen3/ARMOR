@@ -233,12 +233,33 @@ def project_points_to_mesh(points_xyz, vertices, faces):
     verts_np = _to_numpy(vertices).astype(np.float64)
     faces_np = _to_numpy(faces).astype(np.int64)
 
+    # trimesh's kdtree query rejects non-finite query points with an opaque
+    # "'x' must be finite" error. A NaN/inf here means an upstream binding was
+    # corrupted (e.g. a previous projection onto a degenerate face); snap those
+    # points to the mesh centroid so we still get a (meaningless but finite)
+    # assignment instead of crashing, and warn loudly.
+    bad_pts = ~np.isfinite(points_np).all(axis=1)
+    if bad_pts.any():
+        print(f"[WARN] project_points_to_mesh: {int(bad_pts.sum())}/{len(points_np)} "
+              f"query points are non-finite; clamping them to the mesh centroid.")
+        points_np[bad_pts] = verts_np.mean(axis=0)
+
     mesh = trimesh.Trimesh(vertices=verts_np, faces=faces_np, process=False)
     closest, _distance, face_id = trimesh.proximity.closest_point(mesh, points_np)
+    # points_to_barycentric divides by the triangle's area; a degenerate
+    # (zero-area) face yields NaN/inf bary that would propagate into _uvw/alpha
+    # and resurface as NaN centers on the next frame. Replace any non-finite
+    # bary row with the face centroid so the binding stays well defined.
     bary = trimesh.triangles.points_to_barycentric(mesh.triangles[face_id], closest)
+    bad_bary = ~np.isfinite(bary).all(axis=1)
+    if bad_bary.any():
+        print(f"[WARN] project_points_to_mesh: {int(bad_bary.sum())}/{len(bary)} "
+              f"barycentric coords non-finite (degenerate faces); using face centroid.")
+        bary[bad_bary] = 1.0 / 3.0
 
     normals = mesh.face_normals[face_id]
     signed_hover = np.einsum("ij,ij->i", points_np - closest, normals)
+    signed_hover = np.nan_to_num(signed_hover, nan=0.0, posinf=0.0, neginf=0.0)
 
     device = points_xyz.device if torch.is_tensor(points_xyz) else "cuda"
     return (

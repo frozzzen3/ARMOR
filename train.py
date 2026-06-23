@@ -353,7 +353,8 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
             vg_resolution=base_args.tvm_vg_resolution,
             dotnet=base_args.tvm_dotnet,
         )
-        tvm_tracker.ensure_tracking()  # volume-track the whole range once (cached)
+        # Volume tracking now runs per frame-pair, on demand inside deform(s, t),
+        # right before each re-binding -- instead of once over the whole range here.
 
     gaussians = gaussianModel[gs_type](base_args.sh_degree)
     canonical_policy_path = requested_policy_path or ""
