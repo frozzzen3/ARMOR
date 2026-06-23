@@ -1,0 +1,87 @@
+{
+  "format": 1,
+  "restore": {
+    "/home/frozzzen/Documents/Github_SINRG/TSMC/arap-volume-tracking/Framework/Framework.csproj": {}
+  },
+  "projects": {
+    "/home/frozzzen/Documents/Github_SINRG/TSMC/arap-volume-tracking/Framework/Framework.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/home/frozzzen/Documents/Github_SINRG/TSMC/arap-volume-tracking/Framework/Framework.csproj",
+        "projectName": "Framework",
+        "projectPath": "/home/frozzzen/Documents/Github_SINRG/TSMC/arap-volume-tracking/Framework/Framework.csproj",
+        "packagesPath": "/home/frozzzen/.nuget/packages/",
+        "outputPath": "/home/frozzzen/Documents/Github_SINRG/TSMC/arap-volume-tracking/Framework/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/home/frozzzen/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net7.0"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net7.0": {
+            "targetAlias": "net7.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "9.0.300"
+      },
+      "frameworks": {
+        "net7.0": {
+          "targetAlias": "net7.0",
+          "dependencies": {
+            "MathNet.Numerics": {
+              "target": "Package",
+              "version": "[4.15.0, )"
+            },
+            "System.Drawing.Common": {
+              "target": "Package",
+              "version": "[5.0.2, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "downloadDependencies": [
+            {
+              "name": "Microsoft.AspNetCore.App.Ref",
+              "version": "[7.0.20, 7.0.20]"
+            },
+            {
+              "name": "Microsoft.NETCore.App.Ref",
+              "version": "[7.0.20, 7.0.20]"
+            }
+          ],
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/home/frozzzen/.dotnet/sdk/9.0.305/RuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}
