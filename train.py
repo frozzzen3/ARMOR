@@ -302,6 +302,28 @@ def write_sequence_bundle(model_root, canonical_ply, temporal_path, bindings_dir
           f"TEMPORAL_ATTR_CHECKPOINT={bundle}/temporal_attr_model.pth")
 
 
+def compute_tvm_warped_xyz(tvm_tracker, prev_mesh, curr_mesh, gaussians):
+    """Run the external ARAP/TVM tracker to deform prev_mesh -> curr_mesh, then warp the
+    Gaussian centers by the resulting source->deformed displacement field. Returns the
+    warped centers [G,3] (reader frame) for `retrack_to_mesh(warped_xyz=...)`, or None to
+    fall back. Decoupled from mesh vertex counts -- re-binding handles the topology."""
+    from utils.tvm_tracker import tvm_warped_centers
+
+    s = extract_frame_index(Path(prev_mesh))
+    t = extract_frame_index(Path(curr_mesh))
+    if s is None or t is None:
+        print("[WARN] TVM: could not extract frame indices from mesh names; falling back.")
+        return None
+    path = tvm_tracker.deform(s, t)
+    if path is None:
+        return None
+    warped = tvm_warped_centers(str(path), str(prev_mesh), gaussians,
+                                device=gaussians.get_xyz.device)
+    if warped is not None:
+        print(f"[INFO] retrack via TVM deformed mesh (frames {s}->{t}, face-aligned)")
+    return warped
+
+
 def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
                       save_xyz, debugging, debug_freq, occlusion,
                       requested_policy_path, precaptured_mesh_img_path,
@@ -316,6 +338,22 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
         "method": getattr(base_args, "track_method", "nricp_amberg"),
         "rigid_prealign": getattr(base_args, "track_rigid_prealign", True),
     }
+
+    # External ARAP-volume-tracking + TVM-editing tracker (auto-run during training).
+    tvm_tracker = None
+    if variable_topology and tracker["method"] == "tvm":
+        from utils.tvm_tracker import TvmTracker
+        tvm_tracker = TvmTracker(
+            arap_dir=base_args.tvm_arap_dir,
+            tvm_editor_exe=base_args.tvm_editor_exe,
+            config_template=base_args.tvm_config_template,
+            mesh_paths=mesh_paths,
+            work_dir=(base_args.tvm_work_dir or str(Path(base_args.model_path) / "tvm_tracking")),
+            point_count=base_args.tvm_point_count,
+            vg_resolution=base_args.tvm_vg_resolution,
+            dotnet=base_args.tvm_dotnet,
+        )
+        tvm_tracker.ensure_tracking()  # volume-track the whole range once (cached)
 
     gaussians = gaussianModel[gs_type](base_args.sh_degree)
     canonical_policy_path = requested_policy_path or ""
@@ -423,6 +461,7 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
         print("[INFO] Froze base appearance (SH/opacity/scale) after the canonical frame; "
               "per-frame appearance variation is now carried by the compact temporal model.")
 
+    prev_mesh = canonical_mesh
     for mesh_path in ordered_meshes[1:]:
         run_args = build_frame_run_args(base_args, mesh_path, use_subdir=len(mesh_paths) > 1, policy_path=canonical_policy_path)
         frame_policy_path = canonical_policy_path
@@ -453,11 +492,22 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
             initialize_gaussians=False,
         )
         if variable_topology:
-            gaussians.retrack_to_mesh(scene.point_cloud.vertices, scene.point_cloud.faces, tracker=tracker)
+            warped_xyz = None
+            if tvm_tracker is not None:
+                warped_xyz = compute_tvm_warped_xyz(tvm_tracker, prev_mesh, mesh_path, gaussians)
+            if warped_xyz is not None:
+                gaussians.retrack_to_mesh(scene.point_cloud.vertices, scene.point_cloud.faces,
+                                          warped_xyz=warped_xyz)
+            else:
+                fb_tracker = tracker if tracker["method"] != "tvm" else {"method": "laplacian", "rigid_prealign": True}
+                if tracker["method"] == "tvm":
+                    print("[WARN] TVM tracker unavailable for this frame; falling back to laplacian.")
+                gaussians.retrack_to_mesh(scene.point_cloud.vertices, scene.point_cloud.faces, tracker=fb_tracker)
         else:
             gaussians.rebind_to_mesh(scene.point_cloud.vertices, scene.point_cloud.faces)
         gaussians.point_cloud = scene.point_cloud
         scene.gaussians = gaussians
+        prev_mesh = mesh_path
 
         run_training_loop(
             gs_type=gs_type,
@@ -1145,11 +1195,13 @@ if __name__ == "__main__":
                              "re-bound to the new mesh via register-then-snap tracking. "
                              "Default off: the whole sequence must share topology.")
     parser.add_argument("--track_method", type=str, default="laplacian",
-                        choices=["laplacian", "nricp_amberg", "nricp_sumner", "closest_point"],
+                        choices=["laplacian", "nricp_amberg", "nricp_sumner", "closest_point", "tvm"],
                         help="Tracker used by --variable_topology to re-bind Gaussians each frame: "
                              "'laplacian' (default) = robust Laplacian-regularized non-rigid ICP; "
                              "'nricp_amberg'/'nricp_sumner' = trimesh non-rigid ICP (can be singular "
-                             "on degenerate meshes); 'closest_point' = plain projection (drifts).")
+                             "on degenerate meshes); 'closest_point' = plain projection (drifts); "
+                             "'tvm' = external ARAP-volume-tracking + TVM-editing pipeline (auto-run, "
+                             "highest quality; falls back to laplacian on failure).")
     parser.add_argument("--track_rigid_prealign", action="store_true", default=True,
                         help="Run a rigid ICP pre-alignment before non-rigid registration "
                              "(recommended for large inter-frame motion).")
@@ -1161,6 +1213,23 @@ if __name__ == "__main__":
                              "carried by the compact temporal model, making compact rendering "
                              "match training. Set this to revert to per-frame base fine-tuning "
                              "(requires per-frame checkpoints to render).")
+    # external ARAP/TVM tracker (used when --track_method tvm)
+    parser.add_argument("--tvm_arap_dir", type=str, default="submodules/arap-volume-tracking",
+                        help="Path to the arap-volume-tracking submodule (contains bin/Client.dll, get_transformation.py)")
+    parser.add_argument("--tvm_editor_exe", type=str,
+                        default="submodules/tvm-editing/TVMEditor.Test/bin/Release/net5.0/TVMEditor.Test",
+                        help="Path to the built TVMEditor.Test executable (or its .dll, run via dotnet)")
+    parser.add_argument("--tvm_config_template", type=str,
+                        default="submodules/arap-volume-tracking/config/config-dancer-max.xml",
+                        help="ARAP Client config template (its tuned params are kept; frame range / dirs / prefix are overridden)")
+    parser.add_argument("--tvm_point_count", type=int, default=2000,
+                        help="ARAP volume tracking control-point count")
+    parser.add_argument("--tvm_vg_resolution", type=int, default=512,
+                        help="ARAP volume grid resolution")
+    parser.add_argument("--tvm_dotnet", type=str, default="dotnet",
+                        help="dotnet launcher used to run Client.dll (and the editor if given as .dll)")
+    parser.add_argument("--tvm_work_dir", type=str, default="",
+                        help="Working dir for staged meshes + tracking outputs (default: <model_path>/tvm_tracking)")
     # <<<< variable-topology
 
     lp = ModelParams(parser) # LoadingParams

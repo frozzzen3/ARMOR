@@ -216,7 +216,8 @@ class GaussianMeshModel(GaussianModel):
         self.update_alpha()
         self.prepare_scaling_rot()
 
-    def retrack_to_mesh(self, vertices, faces, tracker=None, reset_uvw_state=True):
+    def retrack_to_mesh(self, vertices, faces, tracker=None, deformed_src=None,
+                        warped_xyz=None, reset_uvw_state=True):
         """
         Re-bind the persistent Gaussian set to a new mesh of *arbitrary* topology.
 
@@ -254,35 +255,49 @@ class GaussianMeshModel(GaussianModel):
 
         with torch.no_grad():
             # 1. warp the previous (temporal-free) Gaussian centers towards the new frame
-            deformed_src = None
-            if method == "laplacian":
-                deformed_src = register_mesh_laplacian(
-                    self.vertices.detach(),
-                    self.faces.detach(),
-                    new_vertices,
-                    new_faces,
-                    rigid_prealign=tracker.get("rigid_prealign", True),
-                )
-            elif method in ("nricp_amberg", "nricp_sumner"):
-                deformed_src = register_mesh_nonrigid(
-                    self.vertices.detach(),
-                    self.faces.detach(),
-                    new_vertices,
-                    new_faces,
-                    method=method,
-                    rigid_prealign=tracker.get("rigid_prealign", True),
-                    steps=tracker.get("steps", None),
-                )
-            if method != "closest_point" and deformed_src is None:
-                print("[WARN] retrack_to_mesh: non-rigid registration unavailable; "
-                      "falling back to closest-point warp for this frame.")
-            if deformed_src is None:
-                # closest-point tracker (or registration fallback): snap the previous
-                # centers directly onto the new surface.
-                warped_xyz = self._xyz.detach()
+            if warped_xyz is not None:
+                # Pre-warped Gaussian centers supplied directly (e.g. the ARAP/TVM tracker
+                # applies its deformation field to the centers). Decoupled from any mesh
+                # vertex count -- re-binding handles the topology change in step 2/3.
+                warped_xyz = torch.as_tensor(warped_xyz, dtype=torch.float32, device="cuda").detach()
+                if warped_xyz.shape[0] != self._xyz.shape[0]:
+                    raise ValueError(
+                        f"warped_xyz count {warped_xyz.shape[0]} != Gaussian count {self._xyz.shape[0]}"
+                    )
             else:
-                old_face_tris = deformed_src[self.faces[self.triangle_indices]]  # [G,3,3]
-                warped_xyz = torch.bmm(self.alpha.unsqueeze(1), old_face_tris).squeeze(1)
+                if deformed_src is not None:
+                    # Externally-provided deformed previous mesh, vertex-aligned with
+                    # self.vertices (e.g. laplacian/nricp deform self.vertices directly).
+                    deformed_src = torch.as_tensor(deformed_src, dtype=torch.float32, device="cuda")
+                    if deformed_src.shape[0] != self.vertices.shape[0]:
+                        raise ValueError(
+                            f"deformed_src vertex count {deformed_src.shape[0]} != current mesh "
+                            f"vertex count {self.vertices.shape[0]}"
+                        )
+                elif method == "laplacian":
+                    deformed_src = register_mesh_laplacian(
+                        self.vertices.detach(), self.faces.detach(),
+                        new_vertices, new_faces,
+                        rigid_prealign=tracker.get("rigid_prealign", True),
+                    )
+                elif method in ("nricp_amberg", "nricp_sumner"):
+                    deformed_src = register_mesh_nonrigid(
+                        self.vertices.detach(), self.faces.detach(),
+                        new_vertices, new_faces,
+                        method=method,
+                        rigid_prealign=tracker.get("rigid_prealign", True),
+                        steps=tracker.get("steps", None),
+                    )
+                if method != "closest_point" and deformed_src is None:
+                    print("[WARN] retrack_to_mesh: non-rigid registration unavailable; "
+                          "falling back to closest-point warp for this frame.")
+                if deformed_src is None:
+                    # closest-point tracker (or registration fallback): snap the previous
+                    # centers directly onto the new surface.
+                    warped_xyz = self._xyz.detach()
+                else:
+                    old_face_tris = deformed_src[self.faces[self.triangle_indices]]  # [G,3,3]
+                    warped_xyz = torch.bmm(self.alpha.unsqueeze(1), old_face_tris).squeeze(1)
 
             # 2. install the new scaffold as fixed buffers (no vertex optimization)
             self.vertices = new_vertices

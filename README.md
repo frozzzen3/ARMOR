@@ -201,8 +201,9 @@ python metrics.py -m output/dancer_network/frame_0001 ... --gs_type gs_mesh
 | `--recompute_sequence_policy`  | Recompute the sequence policy even if cached             | False   |
 | `--strict_sequence_topology`   | Require identical face ordering across frames            | False   |
 | `--variable_topology`          | Allow per-frame topology changes; persistent Gaussians re-bound by tracking | False |
-| `--track_method`               | Re-binding tracker: `laplacian`, `nricp_amberg`, `nricp_sumner`, `closest_point` | `laplacian` |
+| `--track_method`               | Re-binding tracker: `laplacian`, `nricp_amberg`, `nricp_sumner`, `closest_point`, `tvm` | `laplacian` |
 | `--track_rigid_prealign`       | Rigid ICP pre-align before non-rigid registration        | True    |
+| `--tvm_arap_dir`/`--tvm_editor_exe`/`--tvm_config_template` | External ARAP+TVM tracker paths (when `--track_method tvm`); auto-runs the pipeline per frame, falls back to laplacian on failure | submodules/… |
 | `--temporal_attributes`        | Enable the compact temporal attribute module             | False   |
 | `--temporal_attr_width/_depth/_latent_dim` | MLP width / depth / per-triangle latent size | 64 / 3 / 8 |
 | `--temporal_attr_lr`           | Temporal module learning rate                            | 1e-3    |

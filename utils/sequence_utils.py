@@ -288,6 +288,16 @@ def ensure_sequence_policy_file(base_args, model_params, mesh_paths, requested_p
         if reference_faces is None:
             reference_faces = faces.copy()
             num_triangles = int(faces.shape[0])
+        elif reference_faces.shape != faces.shape:
+            # Differing topology cannot be aggregated into one per-triangle policy. In
+            # strict mode this is an error; otherwise fall back to a first-frame-only
+            # policy (later frames are handled by variable-topology re-binding).
+            if base_args.strict_sequence_topology:
+                validate_sequence_topology(reference_faces, faces, mesh_path, strict=True)
+            print(f"[WARN] ensure_sequence_policy_file: {mesh_path} topology differs "
+                  f"({faces.shape} vs {reference_faces.shape}); basing the sequence policy "
+                  f"on the first frame only. (Pass --variable_topology to silence this.)")
+            break
         else:
             validate_sequence_topology(
                 reference_faces,

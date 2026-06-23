@@ -28,3 +28,8 @@ exp_script_*/
 MaGS/
 
 CLAUDE.md
+
+/submodules/arap-volume-tracking/data
+/submodules/arap-volume-tracking/output
+/submodules/arap-volume-tracking/bin
+/submodules/tvm-editing/TVMEditor.Test/bin

@@ -25,7 +25,15 @@ TEMPORAL_MAX_D_COLOR="${TEMPORAL_MAX_D_COLOR:-0.5}"
 # different topology (no consistent-topology preprocessing). Default off, so the
 # default invocation is unchanged.
 VARIABLE_TOPOLOGY="${VARIABLE_TOPOLOGY:-1}"
-TRACK_METHOD="${TRACK_METHOD:-laplacian}"
+TRACK_METHOD="${TRACK_METHOD:-tvm}"
+# External ARAP+TVM tracker (only used when TRACK_METHOD=tvm). Defaults point at the
+# submodules; override if built elsewhere.
+TVM_ARAP_DIR="${TVM_ARAP_DIR:-submodules/arap-volume-tracking}"
+TVM_EDITOR_EXE="${TVM_EDITOR_EXE:-submodules/tvm-editing/TVMEditor.Test/bin/Release/net5.0/TVMEditor.Test}"
+TVM_CONFIG_TEMPLATE="${TVM_CONFIG_TEMPLATE:-submodules/arap-volume-tracking/config/config-dancer-max.xml}"
+TVM_POINT_COUNT="${TVM_POINT_COUNT:-2000}"
+TVM_VG_RESOLUTION="${TVM_VG_RESOLUTION:-512}"
+TVM_DOTNET="${TVM_DOTNET:-dotnet}"
 
 temporal_args=()
 if [[ "${TEMPORAL_ATTRIBUTES}" == "1" || "${TEMPORAL_ATTRIBUTES}" == "true" ]]; then
@@ -42,6 +50,16 @@ fi
 vartopo_args=()
 if [[ "${VARIABLE_TOPOLOGY}" == "1" || "${VARIABLE_TOPOLOGY}" == "true" ]]; then
   vartopo_args+=(--variable_topology --track_method "${TRACK_METHOD}")
+  if [[ "${TRACK_METHOD}" == "tvm" ]]; then
+    vartopo_args+=(
+      --tvm_arap_dir "${TVM_ARAP_DIR}"
+      --tvm_editor_exe "${TVM_EDITOR_EXE}"
+      --tvm_config_template "${TVM_CONFIG_TEMPLATE}"
+      --tvm_point_count "${TVM_POINT_COUNT}"
+      --tvm_vg_resolution "${TVM_VG_RESOLUTION}"
+      --tvm_dotnet "${TVM_DOTNET}"
+    )
+  fi
 fi
 
 CUDA_VISIBLE_DEVICES="${GPU_ID}" python train.py --eval \
@@ -51,7 +69,7 @@ CUDA_VISIBLE_DEVICES="${GPU_ID}" python train.py --eval \
   --mesh_start "${START_FRAME}" \
   --mesh_end "${END_FRAME}" \
   --canonical_frame "${START_FRAME}" \
-  --temporal_iterations 5000 \
+  --temporal_iterations 1000 \
   --mesh_type sugar \
   --gs_type gs_mesh \
   --debugging \
@@ -64,4 +82,4 @@ CUDA_VISIBLE_DEVICES="${GPU_ID}" python train.py --eval \
   "${temporal_args[@]}" \
   "${vartopo_args[@]}" \
   --precaptured_mesh_img_path "${DATASET}/mesh" \
-  -w --iteration 5000
+  -w --iteration 1000

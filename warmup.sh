@@ -16,7 +16,7 @@ START_MESH="${MESH_DIR}/${MESH_PREFIX}$(printf "%04d" "${START_FRAME}").obj"
 # Variable-topology mode: set VARIABLE_TOPOLOGY=1 when per-frame meshes have
 # different topology. The sequence policy is then based on the first frame only.
 VARIABLE_TOPOLOGY="${VARIABLE_TOPOLOGY:-1}"
-TRACK_METHOD="${TRACK_METHOD:-laplacian}"
+TRACK_METHOD="${TRACK_METHOD:-tvm}"
 
 vartopo_args=()
 if [[ "${VARIABLE_TOPOLOGY}" == "1" || "${VARIABLE_TOPOLOGY}" == "true" ]]; then
