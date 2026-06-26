@@ -21,6 +21,12 @@ TEMPORAL_START_ITER="${TEMPORAL_START_ITER:-100}"
 # temporal model predicts (position/scale/opacity are cached per frame), so this is the
 # main fidelity knob. The 0.1 default is often too tight for per-frame-textured meshes.
 TEMPORAL_MAX_D_COLOR="${TEMPORAL_MAX_D_COLOR:-0.5}"
+# Variable-topology only: also let the compact model predict a per-frame view-dependent
+# f_rest (higher-SH) residual, conditioned on per-Gaussian local mesh deformation. This is
+# what lets later frames recover the SH detail the frozen+shared base only fits for the
+# canonical frame (the cause of later-frame quality loss). Default on for variable-topology.
+TEMPORAL_PREDICT_REST="${TEMPORAL_PREDICT_REST:-1}"
+TEMPORAL_MAX_D_REST="${TEMPORAL_MAX_D_REST:-0.05}"
 # Variable-topology mode: set VARIABLE_TOPOLOGY=1 when per-frame meshes have
 # different topology (no consistent-topology preprocessing). Default off, so the
 # default invocation is unchanged.
@@ -44,7 +50,11 @@ if [[ "${TEMPORAL_ATTRIBUTES}" == "1" || "${TEMPORAL_ATTRIBUTES}" == "true" ]]; 
     --temporal_attr_latent_dim "${TEMPORAL_ATTR_LATENT_DIM}"
     --temporal_start_iter "${TEMPORAL_START_ITER}"
     --temporal_max_d_color "${TEMPORAL_MAX_D_COLOR}"
+    --temporal_max_d_rest "${TEMPORAL_MAX_D_REST}"
   )
+  if [[ "${TEMPORAL_PREDICT_REST}" == "1" || "${TEMPORAL_PREDICT_REST}" == "true" ]]; then
+    temporal_args+=(--temporal_predict_rest)
+  fi
 fi
 
 vartopo_args=()

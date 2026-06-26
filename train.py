@@ -390,14 +390,27 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
     gaussians.training_setup(opt, optimize_vertices=not variable_topology)
     temporal_model = None
     if base_args.temporal_attributes:
+        # Extra knobs (full-SH residual + geometry conditioning) only apply to the
+        # variable-topology path; same-topology behaviour is left byte-for-byte unchanged.
+        extra = dict(predict_rest=False, num_rest_coeffs=0, deform_feature_dim=0,
+                     max_d_rest=base_args.temporal_max_d_rest)
         if variable_topology:
             # one persistent latent per Gaussian -> dynamics survive re-binding.
             # Position/scale/opacity are cached per frame (cheap, exact), so the temporal
-            # model carries only the heavy SH color -- keeps it compact and avoids the
-            # clamp saturation seen when scale/opacity were forced through it.
+            # model carries only SH color -- keeps it compact and avoids the clamp
+            # saturation seen when scale/opacity were forced through it. It carries BOTH the
+            # DC color and (gated by --temporal_predict_rest) the heavy view-dependent f_rest
+            # residual, so later frames recover the SH detail that only the canonical frame is
+            # otherwise fit with -- the source of their quality drop. The residual is
+            # conditioned on a compact per-Gaussian local-deformation feature (MaGS-style),
+            # not a raw scalar time, so it generalizes across frames.
             count_kwarg = {"num_gaussians": int(gaussians._uvw.shape[0])}
             predict = dict(predict_uvw=False, predict_scaling=False,
                            predict_opacity=False, predict_color=True)
+            if base_args.temporal_predict_rest:
+                extra["predict_rest"] = True
+                extra["num_rest_coeffs"] = int((gaussians.max_sh_degree + 1) ** 2 - 1)
+            extra["deform_feature_dim"] = gaussians.DEFORM_FEATURE_DIM
         else:
             count_kwarg = {"num_triangles": int(scene.point_cloud.triangles.shape[0])}
             predict = dict(predict_uvw=base_args.temporal_predict_uvw,
@@ -415,8 +428,14 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
             max_d_opacity=base_args.temporal_max_d_opacity,
             max_d_color=base_args.temporal_max_d_color,
             **predict,
+            **extra,
             lr=base_args.temporal_attr_lr,
         ).cuda()
+        # Capture the canonical-frame geometry reference (the Gaussians are still bound to the
+        # canonical mesh here). Fixed for the rest of training and persisted with the model.
+        if temporal_model.deform_feature_dim > 0:
+            with torch.no_grad():
+                temporal_model.set_canonical_deform_feature(gaussians.compute_deform_feature())
         print(
             "[INFO] Compact temporal attribute model enabled: "
             f"{temporal_model.parameter_count} parameters for {len(mesh_paths)} frames"
@@ -1179,6 +1198,9 @@ if __name__ == "__main__":
                         help="Clamp magnitude for opacity-logit residuals")
     parser.add_argument("--temporal_max_d_color", type=float, default=0.10,
                         help="Clamp magnitude for DC color residuals")
+    parser.add_argument("--temporal_max_d_rest", type=float, default=0.05,
+                        help="Clamp magnitude for view-dependent f_rest (higher-SH) residuals "
+                             "(variable-topology only)")
     parser.add_argument("--temporal_predict_uvw", action="store_true",
                         help="Predict temporal UVW residuals")
     parser.add_argument("--temporal_predict_scaling", action="store_true",
@@ -1187,6 +1209,10 @@ if __name__ == "__main__":
                         help="Predict temporal opacity residuals")
     parser.add_argument("--temporal_predict_color", action="store_true",
                         help="Predict temporal DC color residuals")
+    parser.add_argument("--temporal_predict_rest", action="store_true",
+                        help="Also predict a per-frame view-dependent f_rest (higher-SH) residual "
+                             "(variable-topology only). Lets later frames recover the SH detail "
+                             "that the frozen+shared base only fits for the canonical frame.")
 
     # >>>> variable-topology (persistent-Gaussian registration-driven re-binding)
     parser.add_argument("--variable_topology", action="store_true",

@@ -24,6 +24,10 @@ from utils.graphics_utils import MeshPointCloud
 
 class GaussianMeshModel(GaussianModel):
 
+    # Width of the per-Gaussian local-deformation feature produced by
+    # :meth:`compute_deform_feature` (unit face normal[3] + log area[1] + log edge lengths[3]).
+    DEFORM_FEATURE_DIM = 7
+
     def __init__(self, sh_degree: int):
 
         super().__init__(sh_degree)
@@ -74,7 +78,10 @@ class GaussianMeshModel(GaussianModel):
         features_dc = self._features_dc
         if self.temporal_d_features_dc is not None:
             features_dc = features_dc + self.temporal_d_features_dc
-        return torch.cat((features_dc, self._features_rest), dim=1)
+        features_rest = self._features_rest
+        if self.temporal_d_features_rest is not None:
+            features_rest = features_rest + self.temporal_d_features_rest
+        return torch.cat((features_dc, features_rest), dim=1)
 
     @property
     def get_opacity(self):
@@ -502,6 +509,29 @@ class GaussianMeshModel(GaussianModel):
         self.triangles = self.vertices[self.faces]
         self._calc_xyz()
 
+    def compute_deform_feature(self):
+        """Per-Gaussian local-deformation feature from the currently-bound face geometry.
+
+        Returns ``[N, DEFORM_FEATURE_DIM]``: the unit face normal (3), log face area (1), and
+        log edge lengths (3). These are absolute per-frame face descriptors; the temporal model
+        compares each against its stored canonical-frame value, so the residual is conditioned
+        on how the local mesh deformed rather than on a raw scalar time.
+        """
+        tris = self.triangles[self.triangle_indices]  # [N, 3, 3]
+        v0, v1, v2 = tris[:, 0], tris[:, 1], tris[:, 2]
+        edge_12 = v1 - v0
+        edge_13 = v2 - v0
+        edge_23 = v2 - v1
+        normals = torch.linalg.cross(edge_12, edge_13, dim=-1)
+        normal_norm = torch.linalg.vector_norm(normals, dim=-1, keepdim=True)
+        unit_normals = normals / (normal_norm + self.eps_s0)
+        eps = 1e-8
+        log_area = torch.log(0.5 * normal_norm + eps)
+        log_l12 = torch.log(torch.linalg.vector_norm(edge_12, dim=-1, keepdim=True) + eps)
+        log_l13 = torch.log(torch.linalg.vector_norm(edge_13, dim=-1, keepdim=True) + eps)
+        log_l23 = torch.log(torch.linalg.vector_norm(edge_23, dim=-1, keepdim=True) + eps)
+        return torch.cat((unit_normals, log_area, log_l12, log_l13, log_l23), dim=-1)
+
     def apply_temporal_attributes(self, temporal_model, frame_time):
         if temporal_model is None:
             self.clear_temporal_attributes()
@@ -511,11 +541,15 @@ class GaussianMeshModel(GaussianModel):
             indices = torch.arange(self._uvw.shape[0], device=self._uvw.device)
         else:
             indices = self.triangle_indices
-        deltas = temporal_model(indices, base_uvw, frame_time)
+        deform_feat = None
+        if getattr(temporal_model, "deform_feature_dim", 0) > 0:
+            deform_feat = self.compute_deform_feature()
+        deltas = temporal_model(indices, base_uvw, frame_time, deform_feat=deform_feat)
         self.temporal_d_uvw = deltas.get("d_uvw")
         self.temporal_d_scaling = deltas.get("d_scaling")
         self.temporal_d_opacity = deltas.get("d_opacity")
         self.temporal_d_features_dc = deltas.get("d_features_dc")
+        self.temporal_d_features_rest = deltas.get("d_features_rest")
         self.update_alpha()
 
     def clear_temporal_attributes(self, update_geometry=True):
@@ -523,6 +557,7 @@ class GaussianMeshModel(GaussianModel):
         self.temporal_d_scaling = None
         self.temporal_d_opacity = None
         self.temporal_d_features_dc = None
+        self.temporal_d_features_rest = None
         if update_geometry and self.vertices is not None and self.faces is not None and self.triangle_indices is not None:
             self.update_alpha()
 
