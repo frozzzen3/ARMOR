@@ -20,7 +20,7 @@ TEMPORAL_START_ITER="${TEMPORAL_START_ITER:-100}"
 # DC-color residual clamp. In variable-topology mode color is the ONLY attribute the
 # temporal model predicts (position/scale/opacity are cached per frame), so this is the
 # main fidelity knob. The 0.1 default is often too tight for per-frame-textured meshes.
-TEMPORAL_MAX_D_COLOR="${TEMPORAL_MAX_D_COLOR:-0.5}"
+TEMPORAL_MAX_D_COLOR="${TEMPORAL_MAX_D_COLOR:-1}"
 # Variable-topology only: also let the compact model predict a per-frame view-dependent
 # f_rest (higher-SH) residual, conditioned on per-Gaussian local mesh deformation. This is
 # what lets later frames recover the SH detail the frozen+shared base only fits for the
