@@ -44,7 +44,6 @@ import torchvision.transforms.functional as TF
 
 from pathlib import Path
 
-from scene.temporal_attribute_model import CompactTemporalAttributeModel
 from utils.mesh_utils import (
     infer_mesh_frame_subdir,
     build_precaptured_path,
@@ -57,14 +56,11 @@ from utils.mesh_utils import (
     load_textured_mesh,
     load_textured_mesh_for_nvdiffrast,
 )
-import json
-import shutil
 from utils.sequence_utils import (
     build_frame_run_args,
     ensure_canonical_policy_file,
     load_training_background,
     extract_dataset_args,
-    write_temporal_storage_report,
     ensure_sequence_policy_file,
 )
 
@@ -76,9 +72,7 @@ LOSS_CONVG_THRESH = 0.01
 def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
                       debugging, debug_freq, occlusion, precaptured_mesh_img_path,
                       texture_obj_path, mesh_rasterizer_type, num_iterations,
-                      save_at_end=True, temporal_model=None,
-                      temporal_frame_time=None, temporal_start_iteration=0,
-                      temporal_num_frames=1):
+                      save_at_end=True):
     if debugging:
         print("[DEBUG] [INFO] Debugging mode is on.")
         check_path = Path(scene.model_path) / "debugging" / "training_check"
@@ -93,8 +87,6 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
     viewpoint_stack = None
     frame_subdir = infer_mesh_frame_subdir(texture_obj_path) if precaptured_mesh_img_path else None
     gaussians.optimizer.zero_grad(set_to_none=True)
-    if temporal_model is not None:
-        temporal_model.optimizer.zero_grad(set_to_none=True)
 
     for iteration in range(1, num_iterations + 1):
         os.makedirs(f"{scene.model_path}/xyz", exist_ok=True)
@@ -102,10 +94,6 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
             torch.save(gaussians.get_xyz, f"{scene.model_path}/xyz/{iteration}.pt")
 
         gaussians.update_learning_rate(iteration)
-        if temporal_model is not None and iteration >= temporal_start_iteration:
-            gaussians.apply_temporal_attributes(temporal_model, temporal_frame_time or 0.0)
-        elif hasattr(gaussians, "clear_temporal_attributes"):
-            gaussians.clear_temporal_attributes()
 
         if iteration % 1000 == 0:
             gaussians.oneupSHdegree()
@@ -187,9 +175,6 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
             if iteration < num_iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none=True)
-                if temporal_model is not None and iteration >= temporal_start_iteration:
-                    temporal_model.optimizer.step()
-                    temporal_model.optimizer.zero_grad(set_to_none=True)
 
         if hasattr(gaussians, 'update_alpha'):
             gaussians.update_alpha()
@@ -198,9 +183,6 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
 
     gaussians.optimizer.step()
     gaussians.optimizer.zero_grad(set_to_none=True)
-    if temporal_model is not None:
-        temporal_model.optimizer.step()
-        temporal_model.optimizer.zero_grad(set_to_none=True)
     if hasattr(gaussians, 'update_alpha'):
         gaussians.update_alpha()
     if hasattr(gaussians, 'prepare_scaling_rot'):
@@ -208,98 +190,7 @@ def run_training_loop(gs_type, scene, dataset, gaussians, opt, pipe, save_xyz,
     progress_bar.close()
 
     if save_at_end:
-        if temporal_model is not None and hasattr(gaussians, "clear_temporal_attributes"):
-            gaussians.clear_temporal_attributes()
         scene.save(num_iterations)
-        if temporal_model is not None:
-            temporal_path = Path(scene.model_path) / "point_cloud" / f"iteration_{num_iterations}" / "temporal_attr_model.pth"
-            temporal_model.save(temporal_path)
-            write_temporal_storage_report(
-                gaussians,
-                temporal_model,
-                temporal_num_frames,
-                Path(scene.model_path) / "temporal_storage_report.json",
-            )
-
-
-def save_frame_binding(gaussians, base_model_path, mesh_path):
-    """Cache the compact per-frame binding (triangle ids + logical coords) produced
-    by variable-topology re-tracking, so render can reproduce this frame from the
-    shared persistent base + temporal model without storing a full per-frame ply."""
-    subdir = infer_mesh_frame_subdir(str(mesh_path))
-    if subdir is None or not hasattr(gaussians, "binding_state"):
-        return
-    cache_dir = Path(base_model_path) / "bindings"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"{subdir}.pt"
-    torch.save(gaussians.binding_state(), cache_path)
-    print(f"[INFO] Cached variable-topology binding: {cache_path}")
-
-
-def write_sequence_bundle(model_root, canonical_ply, temporal_path, bindings_dir,
-                          mesh_paths, canonical_mesh, iteration, sh_degree,
-                          mesh_start, mesh_end):
-    """Assemble a self-contained folder that has everything needed to render the whole
-    variable-topology sequence: the single persistent base GS (from the canonical frame),
-    the temporal model, and the per-frame binding caches, plus a manifest.
-
-    Laid out so the existing render path can consume it directly:
-        sequence_bundle/base/point_cloud/iteration_<it>/{point_cloud.ply,model_params.pt}
-        sequence_bundle/temporal_attr_model.pth
-        sequence_bundle/bindings/frame_XXXX.pt
-        sequence_bundle/manifest.json
-    The original per-frame checkpoints under <model_root> are left untouched for debugging.
-    """
-    bundle = Path(model_root) / "sequence_bundle"
-    base_it = bundle / "base" / "point_cloud" / f"iteration_{iteration}"
-    base_it.mkdir(parents=True, exist_ok=True)
-
-    canonical_ply = Path(canonical_ply)
-    if canonical_ply.exists():
-        shutil.copyfile(canonical_ply, base_it / "point_cloud.ply")
-        canonical_params = canonical_ply.with_name("model_params.pt")
-        if canonical_params.exists():
-            shutil.copyfile(canonical_params, base_it / "model_params.pt")
-    else:
-        print(f"[WARN] sequence bundle: canonical checkpoint not found at {canonical_ply}")
-
-    if temporal_path is not None and Path(temporal_path).exists():
-        shutil.copyfile(temporal_path, bundle / "temporal_attr_model.pth")
-
-    bindings_dst = bundle / "bindings"
-    bindings_dst.mkdir(parents=True, exist_ok=True)
-    if Path(bindings_dir).exists():
-        for p in sorted(Path(bindings_dir).glob("*.pt")):
-            shutil.copyfile(p, bindings_dst / p.name)
-
-    frames = []
-    for mesh_path in mesh_paths:
-        subdir = infer_mesh_frame_subdir(str(mesh_path))
-        frames.append({
-            "index": extract_frame_index(Path(mesh_path)),
-            "mesh": str(mesh_path),
-            "binding": f"bindings/{subdir}.pt" if subdir else None,
-            "frame_time": normalized_frame_time(mesh_path, mesh_paths),
-        })
-    manifest = {
-        "gs_type": "gs_mesh",
-        "variable_topology": True,
-        "canonical_frame": extract_frame_index(Path(canonical_mesh)),
-        "mesh_start": mesh_start,
-        "mesh_end": mesh_end,
-        "iteration": iteration,
-        "sh_degree": sh_degree,
-        "base": f"base/point_cloud/iteration_{iteration}/point_cloud.ply",
-        "temporal_model": "temporal_attr_model.pth",
-        "frames": frames,
-    }
-    with open(bundle / "manifest.json", "w") as fh:
-        json.dump(manifest, fh, indent=2)
-
-    print(f"[INFO] Wrote self-contained sequence bundle to: {bundle}")
-    print(f"       render with: BASE_MODEL_PATH={bundle}/base ITERATION={iteration} "
-          f"BINDING_CACHE_DIR={bundle}/bindings "
-          f"TEMPORAL_ATTR_CHECKPOINT={bundle}/temporal_attr_model.pth")
 
 
 def compute_tvm_warped_xyz(tvm_tracker, prev_mesh, curr_mesh, gaussians):
@@ -385,67 +276,7 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
         textured_mesh=textured_mesh,
         initialize_gaussians=True,
     )
-    if variable_topology:
-        gaussians.temporal_per_gaussian = True
     gaussians.training_setup(opt, optimize_vertices=not variable_topology)
-    temporal_model = None
-    if base_args.temporal_attributes:
-        # Extra knobs (full-SH residual + geometry conditioning) only apply to the
-        # variable-topology path; same-topology behaviour is left byte-for-byte unchanged.
-        extra = dict(predict_rest=False, num_rest_coeffs=0, deform_feature_dim=0,
-                     max_d_rest=base_args.temporal_max_d_rest)
-        if variable_topology:
-            # one persistent latent per Gaussian -> dynamics survive re-binding.
-            # Position/scale/opacity are cached per frame (cheap, exact), so the temporal
-            # model carries only SH color -- keeps it compact and avoids the clamp
-            # saturation seen when scale/opacity were forced through it. It carries BOTH the
-            # DC color and (gated by --temporal_predict_rest) the heavy view-dependent f_rest
-            # residual, so later frames recover the SH detail that only the canonical frame is
-            # otherwise fit with -- the source of their quality drop. The residual is
-            # conditioned on a compact per-Gaussian local-deformation feature (MaGS-style),
-            # not a raw scalar time, so it generalizes across frames.
-            count_kwarg = {"num_gaussians": int(gaussians._uvw.shape[0])}
-            predict = dict(predict_uvw=False, predict_scaling=False,
-                           predict_opacity=False, predict_color=True)
-            if base_args.temporal_predict_rest:
-                extra["predict_rest"] = True
-                extra["num_rest_coeffs"] = int((gaussians.max_sh_degree + 1) ** 2 - 1)
-            extra["deform_feature_dim"] = gaussians.DEFORM_FEATURE_DIM
-        else:
-            count_kwarg = {"num_triangles": int(scene.point_cloud.triangles.shape[0])}
-            predict = dict(predict_uvw=base_args.temporal_predict_uvw,
-                           predict_scaling=base_args.temporal_predict_scaling,
-                           predict_opacity=base_args.temporal_predict_opacity,
-                           predict_color=base_args.temporal_predict_color)
-        temporal_model = CompactTemporalAttributeModel(
-            **count_kwarg,
-            latent_dim=base_args.temporal_attr_latent_dim,
-            hidden_dim=base_args.temporal_attr_width,
-            depth=base_args.temporal_attr_depth,
-            time_frequencies=base_args.temporal_attr_time_frequencies,
-            max_d_uvw=base_args.temporal_max_d_uvw,
-            max_d_scaling=base_args.temporal_max_d_scaling,
-            max_d_opacity=base_args.temporal_max_d_opacity,
-            max_d_color=base_args.temporal_max_d_color,
-            **predict,
-            **extra,
-            lr=base_args.temporal_attr_lr,
-        ).cuda()
-        # Capture the canonical-frame geometry reference (the Gaussians are still bound to the
-        # canonical mesh here). Fixed for the rest of training and persisted with the model.
-        if temporal_model.deform_feature_dim > 0:
-            with torch.no_grad():
-                temporal_model.set_canonical_deform_feature(gaussians.compute_deform_feature())
-        print(
-            "[INFO] Compact temporal attribute model enabled: "
-            f"{temporal_model.parameter_count} parameters for {len(mesh_paths)} frames"
-        )
-        write_temporal_storage_report(
-            gaussians,
-            temporal_model,
-            len(mesh_paths),
-            Path(base_args.model_path) / "temporal_storage_report_initial.json",
-        )
     if not variable_topology:
         canonical_policy_path = ensure_canonical_policy_file(scene, dataset_args, requested_policy_path)
 
@@ -464,22 +295,7 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
         texture_obj_path=str(canonical_mesh),
         mesh_rasterizer_type=mesh_rasterizer_type,
         num_iterations=canonical_iterations,
-        temporal_model=temporal_model,
-        temporal_frame_time=normalized_frame_time(canonical_mesh, mesh_paths),
-        temporal_start_iteration=base_args.temporal_start_iter,
-        temporal_num_frames=len(mesh_paths),
     )
-    if variable_topology:
-        save_frame_binding(gaussians, base_args.model_path, canonical_mesh)
-
-    # Freeze the shared base appearance after the canonical frame so per-frame variation
-    # is carried by the temporal model (keeps compact rendering faithful to training).
-    if (temporal_model is not None
-            and hasattr(gaussians, "freeze_base_appearance")
-            and not getattr(base_args, "train_base_per_frame", False)):
-        gaussians.freeze_base_appearance()
-        print("[INFO] Froze base appearance (SH/opacity/scale) after the canonical frame; "
-              "per-frame appearance variation is now carried by the compact temporal model.")
 
     prev_mesh = canonical_mesh
     for mesh_path in ordered_meshes[1:]:
@@ -497,7 +313,7 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
         dataset = extract_dataset_args(model_params, run_args)
 
         prepare_output_and_logger(dataset)
-        print(f"[INFO] Temporal frame: {mesh_path}")
+        print(f"[INFO] Frame: {mesh_path}")
         if mesh_rasterizer_type == "pytorch3d":
             textured_mesh = load_textured_mesh(dataset, str(mesh_path))
         else:
@@ -544,44 +360,9 @@ def training_sequence(gs_type, base_args, opt, pipe, mesh_paths,
             texture_obj_path=str(mesh_path),
             mesh_rasterizer_type=mesh_rasterizer_type,
             num_iterations=temporal_iterations,
-            temporal_model=temporal_model,
-            temporal_frame_time=normalized_frame_time(mesh_path, mesh_paths),
-            temporal_start_iteration=base_args.temporal_start_iter,
-            temporal_num_frames=len(mesh_paths),
-        )
-        if variable_topology:
-            save_frame_binding(gaussians, base_args.model_path, mesh_path)
-
-    root_temporal_path = None
-    if temporal_model is not None:
-        root_temporal_path = Path(base_args.model_path) / "temporal_attr_model.pth"
-        temporal_model.save(root_temporal_path)
-        write_temporal_storage_report(
-            gaussians,
-            temporal_model,
-            len(mesh_paths),
-            Path(base_args.model_path) / "temporal_storage_report.json",
-        )
-        print(f"[INFO] Saved final compact temporal model to: {root_temporal_path}")
-
-    # Assemble a self-contained render bundle (one base GS + temporal model + per-frame
-    # bindings + manifest) so the whole sequence can be rendered from a single folder.
-    if variable_topology:
-        canonical_subdir = infer_mesh_frame_subdir(str(canonical_mesh))
-        canonical_model_path = base_args.model_path
-        if canonical_subdir is not None and len(mesh_paths) > 1:
-            canonical_model_path = append_subdir(base_args.model_path, canonical_subdir)
-        canonical_ply = (Path(canonical_model_path) / "point_cloud"
-                         / f"iteration_{canonical_iterations}" / "point_cloud.ply")
-        write_sequence_bundle(
-            base_args.model_path, canonical_ply, root_temporal_path,
-            Path(base_args.model_path) / "bindings",
-            mesh_paths, canonical_mesh, canonical_iterations, base_args.sh_degree,
-            base_args.mesh_start, base_args.mesh_end,
         )
 
 
-   
 def training(gs_type, dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint,
             debug_from, save_xyz,
             # >>>> [YC] add
@@ -1176,51 +957,14 @@ if __name__ == "__main__":
                         help="Recompute sequence-aware policy even when --policy_path already exists")
     parser.add_argument("--strict_sequence_topology", action="store_true",
                         help="Require every frame to have the exact same face index array as the first frame")
-    parser.add_argument("--temporal_attributes", action="store_true",
-                        help="Enable compact neural prediction of Gaussian attribute residuals over time")
-    parser.add_argument("--temporal_attr_lr", type=float, default=1e-3,
-                        help="Learning rate for compact temporal attribute module")
-    parser.add_argument("--temporal_attr_width", type=int, default=64,
-                        help="Hidden width of compact temporal attribute MLP")
-    parser.add_argument("--temporal_attr_depth", type=int, default=3,
-                        help="Hidden depth of compact temporal attribute MLP")
-    parser.add_argument("--temporal_attr_latent_dim", type=int, default=8,
-                        help="Per-triangle latent dimension for compact temporal attributes")
-    parser.add_argument("--temporal_attr_time_frequencies", type=int, default=6,
-                        help="Number of sinusoidal time frequencies")
-    parser.add_argument("--temporal_start_iter", type=int, default=100,
-                        help="Iteration before temporal residuals start training")
-    parser.add_argument("--temporal_max_d_uvw", type=float, default=0.05,
-                        help="Clamp magnitude for raw UVW residuals")
-    parser.add_argument("--temporal_max_d_scaling", type=float, default=0.10,
-                        help="Clamp magnitude for log-scaling residuals")
-    parser.add_argument("--temporal_max_d_opacity", type=float, default=0.50,
-                        help="Clamp magnitude for opacity-logit residuals")
-    parser.add_argument("--temporal_max_d_color", type=float, default=0.10,
-                        help="Clamp magnitude for DC color residuals")
-    parser.add_argument("--temporal_max_d_rest", type=float, default=0.05,
-                        help="Clamp magnitude for view-dependent f_rest (higher-SH) residuals "
-                             "(variable-topology only)")
-    parser.add_argument("--temporal_predict_uvw", action="store_true",
-                        help="Predict temporal UVW residuals")
-    parser.add_argument("--temporal_predict_scaling", action="store_true",
-                        help="Predict temporal scaling residuals")
-    parser.add_argument("--temporal_predict_opacity", action="store_true",
-                        help="Predict temporal opacity residuals")
-    parser.add_argument("--temporal_predict_color", action="store_true",
-                        help="Predict temporal DC color residuals")
-    parser.add_argument("--temporal_predict_rest", action="store_true",
-                        help="Also predict a per-frame view-dependent f_rest (higher-SH) residual "
-                             "(variable-topology only). Lets later frames recover the SH detail "
-                             "that the frozen+shared base only fits for the canonical frame.")
 
     # >>>> variable-topology (persistent-Gaussian registration-driven re-binding)
     parser.add_argument("--variable_topology", action="store_true",
                         help="Allow each frame's mesh to have a different topology. Keeps a fixed, "
-                             "persistent Gaussian set whose identity (and per-Gaussian temporal "
-                             "residuals) persist across frames; each frame the Gaussians are "
-                             "re-bound to the new mesh via register-then-snap tracking. "
-                             "Default off: the whole sequence must share topology.")
+                             "persistent Gaussian set whose identity persists across frames; each "
+                             "frame the Gaussians are re-bound to the new mesh via register-then-snap "
+                             "tracking and the full per-frame appearance is trained and saved as that "
+                             "frame's own checkpoint. Default off: the whole sequence must share topology.")
     parser.add_argument("--track_method", type=str, default="laplacian",
                         choices=["laplacian", "nricp_amberg", "nricp_sumner", "closest_point", "tvm"],
                         help="Tracker used by --variable_topology to re-bind Gaussians each frame: "
@@ -1232,14 +976,6 @@ if __name__ == "__main__":
     parser.add_argument("--track_rigid_prealign", action="store_true", default=True,
                         help="Run a rigid ICP pre-alignment before non-rigid registration "
                              "(recommended for large inter-frame motion).")
-    parser.add_argument("--train_base_per_frame", action="store_true",
-                        help="Keep optimizing the shared base Gaussian appearance "
-                             "(SH/opacity/scale) on every frame instead of freezing it after "
-                             "the canonical frame. By default, when --temporal_attributes is "
-                             "set the base is frozen so per-frame appearance variation is "
-                             "carried by the compact temporal model, making compact rendering "
-                             "match training. Set this to revert to per-frame base fine-tuning "
-                             "(requires per-frame checkpoints to render).")
     # external ARAP/TVM tracker (used when --track_method tvm)
     parser.add_argument("--tvm_arap_dir", type=str, default="submodules/arap-volume-tracking",
                         help="Path to the arap-volume-tracking submodule (contains bin/Client.dll, get_transformation.py)")
@@ -1276,15 +1012,6 @@ if __name__ == "__main__":
     op = optimizationParamTypeCallbacks[args.gs_type](parser)
     pp = PipelineParams(parser)
     args = parser.parse_args(sys.argv[1:])
-    if args.temporal_attributes and not any([
-        args.temporal_predict_uvw,
-        args.temporal_predict_scaling,
-        args.temporal_predict_opacity,
-        args.temporal_predict_color,
-    ]):
-        args.temporal_predict_scaling = True
-        args.temporal_predict_opacity = True
-        args.temporal_predict_color = True
 
     args.save_iterations.append(args.iterations)
 

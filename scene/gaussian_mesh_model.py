@@ -24,10 +24,6 @@ from utils.graphics_utils import MeshPointCloud
 
 class GaussianMeshModel(GaussianModel):
 
-    # Width of the per-Gaussian local-deformation feature produced by
-    # :meth:`compute_deform_feature` (unit face normal[3] + log area[1] + log edge lengths[3]).
-    DEFORM_FEATURE_DIM = 7
-
     def __init__(self, sh_degree: int):
 
         super().__init__(sh_degree)
@@ -52,11 +48,6 @@ class GaussianMeshModel(GaussianModel):
         # >>>> [YC] add
         self.triangle_indices = None
         # <<<< [YC] add
-        # When True, temporal residuals are keyed on persistent Gaussian identity
-        # (one latent per Gaussian) instead of per triangle. Set by the
-        # variable-topology training path so dynamics survive re-binding.
-        self.temporal_per_gaussian = False
-        self.clear_temporal_attributes(update_geometry=False)
 
     @property
     def get_xyz(self):
@@ -68,27 +59,15 @@ class GaussianMeshModel(GaussianModel):
 
     @property
     def get_scaling(self):
-        scaling = self._scaling
-        if self.temporal_d_scaling is not None:
-            scaling = scaling + self.temporal_d_scaling
-        return self.scaling_activation(scaling)
+        return self.scaling_activation(self._scaling)
 
     @property
     def get_features(self):
-        features_dc = self._features_dc
-        if self.temporal_d_features_dc is not None:
-            features_dc = features_dc + self.temporal_d_features_dc
-        features_rest = self._features_rest
-        if self.temporal_d_features_rest is not None:
-            features_rest = features_rest + self.temporal_d_features_rest
-        return torch.cat((features_dc, features_rest), dim=1)
+        return torch.cat((self._features_dc, self._features_rest), dim=1)
 
     @property
     def get_opacity(self):
-        opacity = self._opacity
-        if self.temporal_d_opacity is not None:
-            opacity = opacity + self.temporal_d_opacity
-        return self.opacity_activation(opacity)
+        return self.opacity_activation(self._opacity)
 
     @property
     def get_mesh_id(self):
@@ -324,68 +303,6 @@ class GaussianMeshModel(GaussianModel):
         self.update_alpha()
         self.prepare_scaling_rot()
 
-    def binding_state(self):
-        """Return the compact per-frame binding produced by re-tracking.
-
-        Only the lightweight, frame-specific quantities are returned: the triangle
-        assignment and the logical coordinates. Appearance / opacity / scale stay
-        in the shared persistent base and time-variation is handled by the temporal
-        model, so caching just this is enough to reproduce a frame at render time.
-        """
-        return {
-            "triangle_indices": self.triangle_indices.detach().cpu().clone(),
-            "uvw": self._uvw.detach().cpu().clone(),
-            # scale and opacity are geometry-coupled (per-frame face sizes / coverage),
-            # so they are cached per frame and reproduced exactly rather than squeezed
-            # through the clamped temporal model. Both are tiny (G x 1).
-            "scale": self._scale.detach().cpu().clone(),
-            "opacity": self._opacity.detach().cpu().clone(),
-            "num_gaussians": int(self._uvw.shape[0]),
-        }
-
-    def apply_cached_binding(self, vertices, faces, triangle_indices, uvw, scale=None, opacity=None):
-        """Restore a cached per-frame binding for variable-topology rendering.
-
-        Installs the frame mesh as a fixed scaffold and restores the tracked
-        triangle assignment and logical coordinates, then recomputes geometry.
-        Appearance / opacity / scale remain as the loaded persistent base; temporal
-        residuals are applied separately by :meth:`apply_temporal_attributes`.
-        """
-        if not isinstance(vertices, torch.Tensor):
-            vertices = torch.tensor(vertices)
-        if not isinstance(faces, torch.Tensor):
-            faces = torch.tensor(faces)
-        self.vertices = vertices.detach().to(device="cuda", dtype=torch.float32)
-        self.faces = faces.detach().to(device="cuda", dtype=torch.long)
-        self.triangle_indices = torch.as_tensor(triangle_indices, dtype=torch.long, device="cuda")
-        self._uvw = nn.Parameter(torch.as_tensor(uvw, dtype=torch.float32, device="cuda"))
-        self._alpha = self._uvw
-        if scale is not None:
-            self._scale = nn.Parameter(torch.as_tensor(scale, dtype=torch.float32, device="cuda"))
-        if opacity is not None:
-            self._opacity = nn.Parameter(torch.as_tensor(opacity, dtype=torch.float32, device="cuda"))
-        self.triangles = self.vertices[self.faces]
-        self.update_alpha()
-        self.prepare_scaling_rot()
-
-    def freeze_base_appearance(self):
-        """Stop optimizing the shared base SH color (features) so that per-frame color
-        variation is carried by the compact temporal model.
-
-        Only the heavy, slowly-varying SH features are frozen+shared (that is the storage
-        win). The cheap, strongly per-frame-varying attributes -- binding (`_uvw` /
-        triangle indices) and the geometry-coupled `_scale` / `_opacity` (face sizes and
-        coverage differ per frame) -- stay trainable and are cached per frame, so they are
-        reproduced exactly at render instead of being squeezed through the temporal
-        model's clamps.
-        """
-        if getattr(self, "optimizer", None) is None:
-            return
-        frozen = {"f_dc", "f_rest"}
-        for group in self.optimizer.param_groups:
-            if group.get("name") in frozen:
-                group["lr"] = 0.0
-
     def _reset_optimizer_state(self, group_name):
         """Drop the Adam moments for a named optimizer group so it restarts clean.
 
@@ -399,10 +316,8 @@ class GaussianMeshModel(GaussianModel):
                 for param in group["params"]:
                     self.optimizer.state.pop(param, None)
 
-    def _decode_uvw(self, include_temporal=True):
+    def _decode_uvw(self):
         raw = self._uvw
-        if include_temporal and self.temporal_d_uvw is not None:
-            raw = raw + self.temporal_d_uvw
         w1 = torch.sigmoid(raw[:, 0:1])
         w2 = torch.sigmoid(raw[:, 1:2]) * (1.0 - w1)
         w3 = torch.sigmoid(raw[:, 2:3])
@@ -509,58 +424,6 @@ class GaussianMeshModel(GaussianModel):
         self.triangles = self.vertices[self.faces]
         self._calc_xyz()
 
-    def compute_deform_feature(self):
-        """Per-Gaussian local-deformation feature from the currently-bound face geometry.
-
-        Returns ``[N, DEFORM_FEATURE_DIM]``: the unit face normal (3), log face area (1), and
-        log edge lengths (3). These are absolute per-frame face descriptors; the temporal model
-        compares each against its stored canonical-frame value, so the residual is conditioned
-        on how the local mesh deformed rather than on a raw scalar time.
-        """
-        tris = self.triangles[self.triangle_indices]  # [N, 3, 3]
-        v0, v1, v2 = tris[:, 0], tris[:, 1], tris[:, 2]
-        edge_12 = v1 - v0
-        edge_13 = v2 - v0
-        edge_23 = v2 - v1
-        normals = torch.linalg.cross(edge_12, edge_13, dim=-1)
-        normal_norm = torch.linalg.vector_norm(normals, dim=-1, keepdim=True)
-        unit_normals = normals / (normal_norm + self.eps_s0)
-        eps = 1e-8
-        log_area = torch.log(0.5 * normal_norm + eps)
-        log_l12 = torch.log(torch.linalg.vector_norm(edge_12, dim=-1, keepdim=True) + eps)
-        log_l13 = torch.log(torch.linalg.vector_norm(edge_13, dim=-1, keepdim=True) + eps)
-        log_l23 = torch.log(torch.linalg.vector_norm(edge_23, dim=-1, keepdim=True) + eps)
-        return torch.cat((unit_normals, log_area, log_l12, log_l13, log_l23), dim=-1)
-
-    def apply_temporal_attributes(self, temporal_model, frame_time):
-        if temporal_model is None:
-            self.clear_temporal_attributes()
-            return
-        base_uvw = self._decode_uvw(include_temporal=False)
-        if self.temporal_per_gaussian:
-            indices = torch.arange(self._uvw.shape[0], device=self._uvw.device)
-        else:
-            indices = self.triangle_indices
-        deform_feat = None
-        if getattr(temporal_model, "deform_feature_dim", 0) > 0:
-            deform_feat = self.compute_deform_feature()
-        deltas = temporal_model(indices, base_uvw, frame_time, deform_feat=deform_feat)
-        self.temporal_d_uvw = deltas.get("d_uvw")
-        self.temporal_d_scaling = deltas.get("d_scaling")
-        self.temporal_d_opacity = deltas.get("d_opacity")
-        self.temporal_d_features_dc = deltas.get("d_features_dc")
-        self.temporal_d_features_rest = deltas.get("d_features_rest")
-        self.update_alpha()
-
-    def clear_temporal_attributes(self, update_geometry=True):
-        self.temporal_d_uvw = None
-        self.temporal_d_scaling = None
-        self.temporal_d_opacity = None
-        self.temporal_d_features_dc = None
-        self.temporal_d_features_rest = None
-        if update_geometry and self.vertices is not None and self.faces is not None and self.triangle_indices is not None:
-            self.update_alpha()
-
     def training_setup(self, training_args, optimize_vertices=True):
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
@@ -582,7 +445,6 @@ class GaussianMeshModel(GaussianModel):
         pass
 
     def save_ply(self, path):
-        self.clear_temporal_attributes()
         self.update_alpha()
         self.prepare_scaling_rot()
         self._save_ply(path)

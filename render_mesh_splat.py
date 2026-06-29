@@ -30,7 +30,6 @@ import trimesh
 from pytorch3d.structures import Meshes
 from pytorch3d.renderer import TexturesVertex
 from utils.mesh_utils import load_textured_mesh, load_textured_mesh_for_nvdiffrast, infer_mesh_frame_subdir
-from scene.temporal_attribute_model import CompactTemporalAttributeModel
 
 import json
 import time
@@ -142,29 +141,6 @@ def save_scene_card(scene_card: dict, output_path: str):
     except Exception as e:
         print(f"[WARNING] Could not write scene card to {output_path}: {e}")
 
-
-def extract_frame_index(path):
-    match = re.search(r"(\d+)$", Path(path).stem)
-    if match is None:
-        return None
-    return int(match.group(1))
-
-
-def normalized_render_frame_time(texture_obj_path, mesh_start=None, mesh_end=None):
-    if mesh_start is None or mesh_end is None or mesh_start == mesh_end:
-        return 0.0
-    frame_index = extract_frame_index(texture_obj_path)
-    if frame_index is None:
-        return 0.0
-    return float(frame_index - mesh_start) / float(mesh_end - mesh_start)
-
-
-def resolve_temporal_checkpoint(model_path, iteration, requested_path):
-    if requested_path:
-        return Path(requested_path)
-    if iteration == -1:
-        return Path(model_path) / "temporal_attr_model.pth"
-    return Path(model_path) / "point_cloud" / f"iteration_{iteration}" / "temporal_attr_model.pth"
 
 def render_set(gs_type, model_path, name, iteration, views, gaussians, pipeline, background,
                 # >>>> [YC] add
@@ -289,12 +265,7 @@ def render_sets(gs_type: str, dataset : ModelParams, iteration : int, pipeline :
                 policy_path : str = None,
                 precaptured_mesh_img_path : str = None,
                 mesh_rasterizer_type: str = "pytorch3d",
-                temporal_attributes: bool = False,
-                temporal_attr_checkpoint: str = "",
-                mesh_start: int = None,
-                mesh_end: int = None,
                 load_model_path: str = "",
-                binding_cache_dir: str = "",
                 # <<<< [YC] add
                 ):
     render_timer_start = time.time()
@@ -311,47 +282,15 @@ def render_sets(gs_type: str, dataset : ModelParams, iteration : int, pipeline :
             scene_dataset.model_path = load_model_path
             print(f"[INFO] Render:: loading base checkpoint from {load_model_path}")
 
-        # Resolve a cached variable-topology binding for this frame, if available.
-        binding_cache_path = None
-        if binding_cache_dir and gs_type == "gs_mesh":
-            subdir = infer_mesh_frame_subdir(texture_obj_path)
-            if subdir is not None:
-                candidate = Path(binding_cache_dir) / f"{subdir}.pt"
-                if candidate.exists():
-                    binding_cache_path = candidate
-
-        scene_policy_path = policy_path
-        if binding_cache_path is not None:
-            # The frame mesh is only a scaffold (the persistent base is re-bound from the
-            # cached binding), so the per-frame point cloud is just needed for its
-            # vertices/faces. Use cheap uniform sampling matching this frame's own
-            # topology instead of a canonical policy that would overflow on a different
-            # triangle count.
-            scene_dataset.total_splats = None
-            scene_dataset.alloc_policy = "uniform"
-            scene_policy_path = ""
-
         # [BUG] trace from here to see how ply and policy are loaded
         scene = Scene(scene_dataset, gaussians,
                       load_iteration=iteration, shuffle=False,
-                      policy_path=scene_policy_path,
+                      policy_path=policy_path,
                       texture_obj_path=texture_obj_path,
                       textured_mesh=textured_mesh
                       )
 
-        if binding_cache_path is not None and hasattr(gaussians, "apply_cached_binding"):
-            # Variable-topology compact render: persistent base + cached per-frame
-            # binding (the mesh tracking) + temporal residuals keyed on Gaussian id.
-            cached = torch.load(binding_cache_path, map_location="cuda")
-            gaussians.apply_cached_binding(
-                scene.point_cloud.vertices, scene.point_cloud.faces,
-                cached["triangle_indices"], cached["uvw"],
-                scale=cached.get("scale"), opacity=cached.get("opacity"),
-            )
-            gaussians.point_cloud = scene.point_cloud
-            gaussians.temporal_per_gaussian = True
-            print(f"[INFO] Render:: applied cached variable-topology binding {binding_cache_path}")
-        elif load_model_path and gs_type == "gs_mesh" and hasattr(gaussians, "rebind_to_mesh"):
+        if load_model_path and gs_type == "gs_mesh" and hasattr(gaussians, "rebind_to_mesh"):
             gaussians.rebind_to_mesh(scene.point_cloud.vertices, scene.point_cloud.faces)
             gaussians.point_cloud = scene.point_cloud
             print(f"[INFO] Render:: rebound base checkpoint to mesh {texture_obj_path}")
@@ -362,22 +301,6 @@ def render_sets(gs_type: str, dataset : ModelParams, iteration : int, pipeline :
             gaussians.prepare_vertices()
         if hasattr(gaussians, 'prepare_scaling_rot'):
             gaussians.prepare_scaling_rot()
-
-        if temporal_attributes:
-            checkpoint_path = resolve_temporal_checkpoint(
-                dataset.model_path,
-                scene.loaded_iter,
-                temporal_attr_checkpoint,
-            )
-            if not checkpoint_path.exists():
-                raise FileNotFoundError(f"Temporal attribute checkpoint not found: {checkpoint_path}")
-            temporal_model = CompactTemporalAttributeModel.load(checkpoint_path, device="cuda")
-            frame_time = normalized_render_frame_time(texture_obj_path, mesh_start=mesh_start, mesh_end=mesh_end)
-            gaussians.apply_temporal_attributes(temporal_model, frame_time)
-            print(
-                f"[INFO] Render:: applied compact temporal attributes from {checkpoint_path} "
-                f"at frame_time={frame_time:.4f}"
-            )
 
         mesh_type = dataset.mesh_type if hasattr(dataset, 'mesh_type') else "sugar"
         print(f"[INFO] Render:: Using mesh type: {mesh_type}")
@@ -415,10 +338,8 @@ def render_sets(gs_type: str, dataset : ModelParams, iteration : int, pipeline :
 
     # Create and save scene card
     render_time = time.time() - render_timer_start
-    scene_card = create_scene_card(dataset, scene, gs_type, occlusion, 
+    scene_card = create_scene_card(dataset, scene, gs_type, occlusion,
                                    mesh_type, iteration, render_time)
-    scene_card["temporal_attributes"] = temporal_attributes
-    scene_card["temporal_attr_checkpoint"] = temporal_attr_checkpoint
     scene_card_path = os.path.join(dataset.model_path, "scene_card.json")
     save_scene_card(scene_card, scene_card_path)
 
@@ -451,25 +372,12 @@ if __name__ == "__main__":
     parser.add_argument('--mesh_type', type=str, default="sugar", help="textured mesh type: sugar, colmap, or others")
     # <<<< [Sam] add
     
-    parser.add_argument("--mesh_rasterizer_type", type=str, default="pytorch3d", 
-                        help="which mesh rasterizer to use: pytorch3d or nvdiffrast") 
-    parser.add_argument("--temporal_attributes", action="store_true",
-                        help="Apply compact temporal attribute model during rendering")
-    parser.add_argument("--temporal_attr_checkpoint", type=str, default="",
-                        help="Path to temporal_attr_model.pth. Defaults to the model iteration folder")
-    parser.add_argument("--mesh_start", type=int, default=None,
-                        help="Start frame index for normalizing temporal render time")
-    parser.add_argument("--mesh_end", type=int, default=None,
-                        help="End frame index for normalizing temporal render time")
+    parser.add_argument("--mesh_rasterizer_type", type=str, default="pytorch3d",
+                        help="which mesh rasterizer to use: pytorch3d or nvdiffrast")
     parser.add_argument("--load_model_path", type=str, default="",
                         help="Optional model path to load checkpoint from while writing renders to -m/--model_path")
-    parser.add_argument("--binding_cache_dir", type=str, default="",
-                        help="Directory of cached per-frame bindings (frame_XXXX.pt) written by "
-                             "variable-topology training. When set, each frame's persistent base "
-                             "checkpoint is re-bound to the frame mesh from its cached binding "
-                             "instead of via same-topology rebind_to_mesh.")
-    
-    
+
+
     args = get_combined_args(parser) # get args from both command line and stored file
     model.gs_type = args.gs_type
     model.num_splats = args.num_splats
@@ -494,11 +402,6 @@ if __name__ == "__main__":
                 policy_path=args.policy_path,
                 precaptured_mesh_img_path=args.precaptured_mesh_img_path,
                 mesh_rasterizer_type=args.mesh_rasterizer_type,
-                temporal_attributes=args.temporal_attributes,
-                temporal_attr_checkpoint=args.temporal_attr_checkpoint,
-                mesh_start=args.mesh_start,
-                mesh_end=args.mesh_end,
                 load_model_path=args.load_model_path,
-                binding_cache_dir=args.binding_cache_dir,
                 # <<<< [YC] add
                 )

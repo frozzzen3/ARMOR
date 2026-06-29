@@ -40,9 +40,6 @@ from scene.colmap_loader import (
     read_intrinsics_text,
 )
 from scene.budgeting import allocate_splats_from_weights, get_budgeting_policy
-from scene.temporal_attribute_model import (
-    estimate_compact_temporal_storage,
-)
 from utils.mesh_utils import (
     infer_mesh_frame_subdir,
     append_subdir,
@@ -235,24 +232,6 @@ def default_sequence_policy_path(dataset, mesh_paths, num_triangles, total_splat
         f"policy/mesh_{dataset.mesh_type}/tri_{num_triangles}/"
         f"{policy_name}/{sequence_frame_label(mesh_paths)}/{total_splats}.npy"
     )
-
-
-def write_temporal_storage_report(gaussians, temporal_model, num_frames, report_path):
-    report = estimate_compact_temporal_storage(gaussians, temporal_model, num_frames)
-    report_path = Path(report_path)
-    report_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(report_path, "w") as fh:
-        json.dump(report, fh, indent=2)
-
-    duplicated_mb = report["duplicated_per_frame_bytes"] / (1024 * 1024)
-    compact_mb = report["compact_temporal_bytes"] / (1024 * 1024)
-    saved_pct = report["estimated_savings_ratio"] * 100.0
-    print(
-        "[INFO] Compact temporal storage estimate: "
-        f"duplicated={duplicated_mb:.2f} MiB, compact={compact_mb:.2f} MiB, "
-        f"saved={saved_pct:.1f}% ({report_path})"
-    )
-    return report
 
 
 def ensure_sequence_policy_file(base_args, model_params, mesh_paths, requested_policy_path="",

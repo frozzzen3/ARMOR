@@ -12,24 +12,13 @@ TOTAL_SPLATS="${TOTAL_SPLATS:-100000}"
 ALLOC_POLICY="${ALLOC_POLICY:-distortion}"
 SEQUENCE_WEIGHT_REDUCTION="${SEQUENCE_WEIGHT_REDUCTION:-max}"
 POLICY_PATH="${POLICY_PATH:-${OUTPUT}/sequence_policy/${ALLOC_POLICY}_sequence_${SEQUENCE_WEIGHT_REDUCTION}_${TOTAL_SPLATS}.npy}"
-TEMPORAL_ATTRIBUTES="${TEMPORAL_ATTRIBUTES:-1}"
-TEMPORAL_ATTR_WIDTH="${TEMPORAL_ATTR_WIDTH:-128}"
-TEMPORAL_ATTR_DEPTH="${TEMPORAL_ATTR_DEPTH:-3}"
-TEMPORAL_ATTR_LATENT_DIM="${TEMPORAL_ATTR_LATENT_DIM:-16}"
-TEMPORAL_START_ITER="${TEMPORAL_START_ITER:-100}"
-# DC-color residual clamp. In variable-topology mode color is the ONLY attribute the
-# temporal model predicts (position/scale/opacity are cached per frame), so this is the
-# main fidelity knob. The 0.1 default is often too tight for per-frame-textured meshes.
-TEMPORAL_MAX_D_COLOR="${TEMPORAL_MAX_D_COLOR:-1}"
-# Variable-topology only: also let the compact model predict a per-frame view-dependent
-# f_rest (higher-SH) residual, conditioned on per-Gaussian local mesh deformation. This is
-# what lets later frames recover the SH detail the frozen+shared base only fits for the
-# canonical frame (the cause of later-frame quality loss). Default on for variable-topology.
-TEMPORAL_PREDICT_REST="${TEMPORAL_PREDICT_REST:-1}"
-TEMPORAL_MAX_D_REST="${TEMPORAL_MAX_D_REST:-0.05}"
+# Per-frame fine-tuning iterations for subsequent (non-canonical) frames.
+TEMPORAL_ITERATIONS="${TEMPORAL_ITERATIONS:-5000}"
+CANONICAL_ITERATIONS="${CANONICAL_ITERATIONS:-5000}"
 # Variable-topology mode: set VARIABLE_TOPOLOGY=1 when per-frame meshes have
-# different topology (no consistent-topology preprocessing). Default off, so the
-# default invocation is unchanged.
+# different topology (no consistent-topology preprocessing). Each frame is re-bound to
+# its mesh and the full per-frame appearance is trained and saved as that frame's own
+# checkpoint (frame_XXXX/). Default off, so the default invocation is unchanged.
 VARIABLE_TOPOLOGY="${VARIABLE_TOPOLOGY:-1}"
 TRACK_METHOD="${TRACK_METHOD:-tvm}"
 # External ARAP+TVM tracker (only used when TRACK_METHOD=tvm). Defaults point at the
@@ -40,22 +29,6 @@ TVM_CONFIG_TEMPLATE="${TVM_CONFIG_TEMPLATE:-submodules/arap-volume-tracking/conf
 TVM_POINT_COUNT="${TVM_POINT_COUNT:-2000}"
 TVM_VG_RESOLUTION="${TVM_VG_RESOLUTION:-512}"
 TVM_DOTNET="${TVM_DOTNET:-dotnet}"
-
-temporal_args=()
-if [[ "${TEMPORAL_ATTRIBUTES}" == "1" || "${TEMPORAL_ATTRIBUTES}" == "true" ]]; then
-  temporal_args+=(
-    --temporal_attributes
-    --temporal_attr_width "${TEMPORAL_ATTR_WIDTH}"
-    --temporal_attr_depth "${TEMPORAL_ATTR_DEPTH}"
-    --temporal_attr_latent_dim "${TEMPORAL_ATTR_LATENT_DIM}"
-    --temporal_start_iter "${TEMPORAL_START_ITER}"
-    --temporal_max_d_color "${TEMPORAL_MAX_D_COLOR}"
-    --temporal_max_d_rest "${TEMPORAL_MAX_D_REST}"
-  )
-  if [[ "${TEMPORAL_PREDICT_REST}" == "1" || "${TEMPORAL_PREDICT_REST}" == "true" ]]; then
-    temporal_args+=(--temporal_predict_rest)
-  fi
-fi
 
 vartopo_args=()
 if [[ "${VARIABLE_TOPOLOGY}" == "1" || "${VARIABLE_TOPOLOGY}" == "true" ]]; then
@@ -79,7 +52,8 @@ CUDA_VISIBLE_DEVICES="${GPU_ID}" python train.py --eval \
   --mesh_start "${START_FRAME}" \
   --mesh_end "${END_FRAME}" \
   --canonical_frame "${START_FRAME}" \
-  --temporal_iterations 10000 \
+  --canonical_iterations "${CANONICAL_ITERATIONS}" \
+  --temporal_iterations "${TEMPORAL_ITERATIONS}" \
   --mesh_type sugar \
   --gs_type gs_mesh \
   --debugging \
@@ -89,7 +63,6 @@ CUDA_VISIBLE_DEVICES="${GPU_ID}" python train.py --eval \
   --alloc_policy "${ALLOC_POLICY}" \
   --policy_path "${POLICY_PATH}" \
   --sequence_weight_reduction "${SEQUENCE_WEIGHT_REDUCTION}" \
-  "${temporal_args[@]}" \
   "${vartopo_args[@]}" \
   --precaptured_mesh_img_path "${DATASET}/mesh" \
-  -w --iteration 10000
+  -w --iteration "${CANONICAL_ITERATIONS}"
