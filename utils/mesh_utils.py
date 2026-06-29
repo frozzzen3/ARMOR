@@ -269,6 +269,107 @@ def project_points_to_mesh(points_xyz, vertices, faces):
     )
 
 
+def project_points_to_triangle_surface(points_xyz, vertices, faces, knn=8):
+    """Normal-aware re-binding: assign each point to the triangle it projects onto
+    *along that triangle's normal* (orthogonal foot inside the face) with the smallest
+    perpendicular distance, returning the face id, barycentric coords of the foot, and
+    the signed normal distance ("hover").
+
+    This inverts the forward hover model ``mu = bary . verts + hover * n * scale`` more
+    faithfully than the generic nearest-surface-point snap (:func:`project_points_to_mesh`),
+    which clamps to triangle edges. It is topology-agnostic, so it survives a codec that
+    reorders or merges/splits faces: only the Gaussian centers and the decoded mesh are
+    needed. Points with no containing face among their ``knn`` nearest fall back to the
+    closest-point projection.
+
+    Args:
+        points_xyz: [G, 3] Gaussian centers (tensor or array).
+        vertices:   [V, 3] decoded-mesh vertices.
+        faces:      [F, 3] decoded-mesh faces.
+        knn:        number of nearest faces (by centroid) to test per point.
+
+    Returns:
+        (face_id [G] long, bary [G, 3] float, signed_hover [G] float) as CUDA tensors.
+    """
+    from scipy.spatial import cKDTree
+
+    points_np = _to_numpy(points_xyz).astype(np.float64)
+    verts_np = _to_numpy(vertices).astype(np.float64)
+    faces_np = _to_numpy(faces).astype(np.int64)
+
+    bad_pts = ~np.isfinite(points_np).all(axis=1)
+    if bad_pts.any():
+        print(f"[WARN] project_points_to_triangle_surface: {int(bad_pts.sum())} non-finite "
+              f"query points; clamping to mesh centroid.")
+        points_np[bad_pts] = verts_np.mean(axis=0)
+
+    tri = verts_np[faces_np]                       # [F,3,3]
+    v0, v1, v2 = tri[:, 0], tri[:, 1], tri[:, 2]
+    e1, e2 = v1 - v0, v2 - v0
+    nrm = np.cross(e1, e2)
+    unit_n = nrm / np.clip(np.linalg.norm(nrm, axis=1, keepdims=True), 1e-12, None)
+    centroids = tri.mean(axis=1)
+
+    G = points_np.shape[0]
+    k = int(min(max(1, knn), faces_np.shape[0]))
+    _, cand = cKDTree(centroids).query(points_np, k=k)
+    cand = cand.reshape(G, k)
+
+    cv0 = v0[cand]                                  # [G,k,3]
+    ce1 = e1[cand]
+    ce2 = e2[cand]
+    cn = unit_n[cand]
+    P = points_np[:, None, :]
+    signed = np.einsum("gkc,gkc->gk", P - cv0, cn)  # perpendicular signed distance
+    foot = P - signed[..., None] * cn               # orthogonal foot on each face plane
+
+    # barycentric of the foot: foot - v0 = b*e1 + c*e2  (solved on the face plane)
+    d00 = np.einsum("gkc,gkc->gk", ce1, ce1)
+    d01 = np.einsum("gkc,gkc->gk", ce1, ce2)
+    d11 = np.einsum("gkc,gkc->gk", ce2, ce2)
+    fp = foot - cv0
+    d20 = np.einsum("gkc,gkc->gk", fp, ce1)
+    d21 = np.einsum("gkc,gkc->gk", fp, ce2)
+    denom = d00 * d11 - d01 * d01
+    denom = np.where(np.abs(denom) < 1e-20, 1e-20, denom)
+    b = (d11 * d20 - d01 * d21) / denom             # weight for v1
+    c = (d00 * d21 - d01 * d20) / denom             # weight for v2
+    a = 1.0 - b - c                                 # weight for v0
+    eps = -1e-4
+    inside = (a >= eps) & (b >= eps) & (c >= eps)
+
+    # among faces whose foot is inside, pick the smallest perpendicular distance
+    cost = np.where(inside, np.abs(signed), np.inf)
+    best = np.argmin(cost, axis=1)
+    rows = np.arange(G)
+    has_inside = np.isfinite(cost[rows, best])
+
+    face_id = cand[rows, best]
+    bary = np.stack([a[rows, best], b[rows, best], c[rows, best]], axis=1)
+    signed_hover = signed[rows, best]
+
+    # fall back to nearest-surface-point for any point with no containing face
+    if not has_inside.all():
+        miss = ~has_inside
+        print(f"[INFO] project_points_to_triangle_surface: {int(miss.sum())}/{G} points have "
+              f"no normal-aligned face among {k} candidates; using closest-point fallback.")
+        fb_face, fb_bary, fb_hover = project_points_to_mesh(points_np[miss], verts_np, faces_np)
+        face_id = face_id.copy()
+        face_id[miss] = _to_numpy(fb_face).astype(np.int64)
+        bary[miss] = _to_numpy(fb_bary)
+        signed_hover[miss] = _to_numpy(fb_hover)
+
+    bary = np.clip(bary, 0.0, 1.0)
+    bary = bary / np.clip(bary.sum(axis=1, keepdims=True), 1e-8, None)
+
+    device = points_xyz.device if torch.is_tensor(points_xyz) else "cuda"
+    return (
+        torch.as_tensor(face_id, dtype=torch.long, device=device),
+        torch.as_tensor(bary, dtype=torch.float32, device=device),
+        torch.as_tensor(signed_hover, dtype=torch.float32, device=device),
+    )
+
+
 def _uniform_graph_laplacian(num_vertices, faces):
     """Purely combinatorial graph Laplacian L = D - A from mesh edges (no edge-length
     weighting), so it is well defined even with zero-length / degenerate edges."""

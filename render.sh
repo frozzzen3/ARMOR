@@ -106,6 +106,7 @@ for frame in $(seq "${START_FRAME}" "${END_FRAME}"); do
     "${skip_args[@]}" \
     "${occlusion_args[@]}" \
     "${white_background_args[@]}" \
+    --rebind_decoded_mesh \
     --total_splats "${TOTAL_SPLATS}" \
     --alloc_policy "${ALLOC_POLICY}" \
     --texture_obj_path "${mesh_path}" \

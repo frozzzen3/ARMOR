@@ -266,31 +266,50 @@ def render_sets(gs_type: str, dataset : ModelParams, iteration : int, pipeline :
                 precaptured_mesh_img_path : str = None,
                 mesh_rasterizer_type: str = "pytorch3d",
                 load_model_path: str = "",
+                rebind_decoded_mesh: bool = False,
                 # <<<< [YC] add
                 ):
     render_timer_start = time.time()
-    
+
     with torch.no_grad():
         gaussians = gaussianModelRender[gs_type](dataset.sh_degree)
         if mesh_rasterizer_type == "pytorch3d":
             textured_mesh = load_textured_mesh(dataset, texture_obj_path)
         elif mesh_rasterizer_type == "nvdiffrast":
             textured_mesh = load_textured_mesh_for_nvdiffrast(dataset, texture_obj_path)
-            
+
         scene_dataset = copy.copy(dataset)
         if load_model_path:
             scene_dataset.model_path = load_model_path
             print(f"[INFO] Render:: loading base checkpoint from {load_model_path}")
+
+        # Option B: skip the scaffold point-cloud sampling; the loaded Gaussians are re-bound
+        # to this frame's (decoded) mesh by normal-aware projection below.
+        rebind_b = rebind_decoded_mesh and gs_type == "gs_mesh" and hasattr(gaussians, "rebind_to_decoded_mesh")
 
         # [BUG] trace from here to see how ply and policy are loaded
         scene = Scene(scene_dataset, gaussians,
                       load_iteration=iteration, shuffle=False,
                       policy_path=policy_path,
                       texture_obj_path=texture_obj_path,
-                      textured_mesh=textured_mesh
+                      textured_mesh=textured_mesh,
+                      skip_pointcloud_sampling=rebind_b,
                       )
 
-        if load_model_path and gs_type == "gs_mesh" and hasattr(gaussians, "rebind_to_mesh"):
+        if rebind_b:
+            gaussians.rebind_to_decoded_mesh(scene.point_cloud.vertices, scene.point_cloud.faces)
+            gaussians.point_cloud = scene.point_cloud
+            # cache the recovered per-frame binding for downstream simulation / relighting
+            rebind_dir = os.path.join(dataset.model_path, "rebind")
+            os.makedirs(rebind_dir, exist_ok=True)
+            frame_tag = infer_mesh_frame_subdir(texture_obj_path) or "frame"
+            torch.save({
+                "triangle_indices": gaussians.triangle_indices.detach().cpu(),
+                "uvw": gaussians._uvw.detach().cpu(),
+            }, os.path.join(rebind_dir, f"{frame_tag}.pt"))
+            print(f"[INFO] Render:: re-bound {gaussians.triangle_indices.shape[0]} Gaussians to "
+                  f"decoded mesh {texture_obj_path}; cached binding to {rebind_dir}/{frame_tag}.pt")
+        elif load_model_path and gs_type == "gs_mesh" and hasattr(gaussians, "rebind_to_mesh"):
             gaussians.rebind_to_mesh(scene.point_cloud.vertices, scene.point_cloud.faces)
             gaussians.point_cloud = scene.point_cloud
             print(f"[INFO] Render:: rebound base checkpoint to mesh {texture_obj_path}")
@@ -376,6 +395,11 @@ if __name__ == "__main__":
                         help="which mesh rasterizer to use: pytorch3d or nvdiffrast")
     parser.add_argument("--load_model_path", type=str, default="",
                         help="Optional model path to load checkpoint from while writing renders to -m/--model_path")
+    parser.add_argument("--rebind_decoded_mesh", action="store_true",
+                        help="Option B: re-bind the loaded Gaussians to this frame's (possibly "
+                             "codec-decoded / reordered / merged-split) mesh by normal-aware "
+                             "projection, and cache the recovered binding for downstream use. "
+                             "Skips the scaffold point-cloud sampling.")
 
 
     args = get_combined_args(parser) # get args from both command line and stored file
@@ -403,5 +427,6 @@ if __name__ == "__main__":
                 precaptured_mesh_img_path=args.precaptured_mesh_img_path,
                 mesh_rasterizer_type=args.mesh_rasterizer_type,
                 load_model_path=args.load_model_path,
+                rebind_decoded_mesh=args.rebind_decoded_mesh,
                 # <<<< [YC] add
                 )

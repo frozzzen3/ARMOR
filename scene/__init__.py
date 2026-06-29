@@ -40,7 +40,8 @@ class Scene:
                 texture_obj_path : str = None, # legacy - use textured_mesh parameter instead
                 policy_path : str = None,
                 textured_mesh = None,
-                initialize_gaussians: bool = True
+                initialize_gaussians: bool = True,
+                skip_pointcloud_sampling: bool = False,
                 # <<<< [YC] add
                 ):
         """b
@@ -106,8 +107,9 @@ class Scene:
                     budget_per_tri=args.budget_per_tri,
                     budgeting_policy_name=args.alloc_policy,
                     mesh_type=args.mesh_type,
-                    textured_mesh = textured_mesh
+                    textured_mesh = textured_mesh,
                     # <<<< [Sam] add
+                    skip_sampling=skip_pointcloud_sampling,
                 )
             elif args.gs_type == "gs_flame":
                 print("Found transforms_train.json file, assuming Flame Blender data set!")
@@ -206,11 +208,14 @@ class Scene:
                                                            "point_cloud.ply"))
             print(f"[INFO] Scene:: loaded gs model from iteration {self.loaded_iter}")
             self.gaussians.point_cloud = scene_info.point_cloud
-            if args.gs_type == "gs_mesh": #! [YC] need to be aware of gs_type
+            if args.gs_type == "gs_mesh" and not skip_pointcloud_sampling: #! [YC] need to be aware of gs_type
                 self.gaussians.triangles = scene_info.point_cloud.triangles
                 # >>>> [YC] add
                 self.gaussians.triangle_indices = scene_info.point_cloud.triangle_indices.cuda() # [YC] add
                 # <<<< [YC] add
+            # When skip_pointcloud_sampling is set (Option B render), the scaffold point cloud
+            # is filler; keep the per-frame binding restored by load_ply and let the caller
+            # re-bind the Gaussians to the decoded mesh (rebind_to_decoded_mesh).
         elif initialize_gaussians: # [YC] note: first time training
             # [YC] note: if using "gs_mesh", create_from_pcd() dispatches to
             # scene/gaussian_mesh_model.py (class GaussianMeshModel(GaussianModel))

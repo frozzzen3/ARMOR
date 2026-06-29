@@ -162,6 +162,61 @@ class GaussianMeshModel(GaussianModel):
             dim=1,
         )
 
+    def _bary_hover_to_raw_uvw(self, w1, w2, w3):
+        """Encode an explicit barycentric (w1, w2) plus a normalized hover height w3 in
+        (0, 1) into raw logical coordinates, matching the decoding in :meth:`_decode_uvw`
+        (w1 = sigmoid(raw0); w2 = sigmoid(raw1)*(1-w1); w3 = sigmoid(raw2)). Unlike
+        :meth:`_surface_alpha_to_raw_uvw` this preserves a supplied hover instead of
+        randomizing it, so a re-bound Gaussian keeps its height above the surface."""
+        eps = 1e-4
+        w1 = w1.clamp(eps, 1.0 - eps)
+        w2_cond = (w2 / (1.0 - w1).clamp_min(eps)).clamp(eps, 1.0 - eps)
+        w3 = w3.clamp(eps, 1.0 - eps)
+        return torch.cat(
+            (inverse_sigmoid(w1), inverse_sigmoid(w2_cond), inverse_sigmoid(w3)),
+            dim=1,
+        )
+
+    def rebind_to_decoded_mesh(self, vertices, faces, knn=8):
+        """Re-bind the loaded Gaussians to an arbitrary decoded mesh (Option B, render time).
+
+        The Gaussian centers are snapped onto the given mesh by normal-aware projection
+        (:func:`project_points_to_triangle_surface`), recovering each Gaussian's triangle,
+        barycentric coordinates and hover in the DECODED mesh's own indexing. Only the
+        Gaussian centers and the mesh are used, so this survives a codec that reorders or
+        merges/splits faces relative to the trained mesh. The recovered binding reproduces
+        the loaded positions and can be cached for downstream simulation / relighting.
+        """
+        from utils.mesh_utils import project_points_to_triangle_surface
+
+        if not isinstance(vertices, torch.Tensor):
+            vertices = torch.tensor(vertices)
+        if not isinstance(faces, torch.Tensor):
+            faces = torch.tensor(faces)
+        vertices = vertices.detach().to(device="cuda", dtype=torch.float32)
+        faces = faces.detach().to(device="cuda", dtype=torch.long)
+
+        centers = self.get_xyz.detach()
+        with torch.no_grad():
+            self.vertices = vertices
+            self.faces = faces
+            self.triangles = self.vertices[self.faces]
+
+            face_id, bary, signed_hover = project_points_to_triangle_surface(
+                centers, vertices, faces, knn=knn
+            )
+            _, hover_scales = self._face_normals_and_hover_scales(self.triangles)  # [F,1]
+            hs = hover_scales[face_id].squeeze(-1)
+            w3 = (signed_hover / hs.clamp_min(self.eps_s0))[:, None]
+
+            self.triangle_indices = face_id
+            self._uvw = nn.Parameter(
+                self._bary_hover_to_raw_uvw(bary[:, 0:1], bary[:, 1:2], w3)
+            )
+            self._alpha = self._uvw
+        self.update_alpha()
+        self.prepare_scaling_rot()
+
     def rebind_to_mesh(self, vertices, faces, triangle_indices=None):
         """
         Reuse the current Gaussian parameters on a new mesh with matching topology.

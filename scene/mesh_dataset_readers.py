@@ -187,8 +187,9 @@ def readNerfSyntheticMeshInfo( # don't use num_splats
         min_splats_per_tri: int = 0,
         max_splats_per_tri: int = 8,
         mesh_type: str = "sugar",
-        textured_mesh = None
+        textured_mesh = None,
         # <<<< [SAM] add
+        skip_sampling: bool = False,
 ) -> SceneInfo:
     image_subdir = infer_mesh_image_subdir(texture_obj_path)
     if image_subdir is not None:
@@ -258,10 +259,35 @@ def readNerfSyntheticMeshInfo( # don't use num_splats
     print("ply_path:", ply_path)
     
     # if not os.path.exists(ply_path):
-    if True:
-        
+    if skip_sampling:
+        # Render path (Option B): the Gaussians are loaded from a checkpoint and re-bound to
+        # this (decoded) mesh by normal-aware projection, so we do NOT allocate or sample a
+        # scaffold point cloud here. (Doing so is wasted work and would break under a policy
+        # built for a different frame's topology.) Build a trivial mesh-geometry point cloud
+        # -- one filler point per face -- whose samples are never used as a Gaussian binding.
+        tri_avg_colors = get_triangle_average_colors(mesh_scene, faces)
+        num_pts = triangles.shape[0]
+        xyz = triangles.mean(dim=1)
+        alpha = torch.full((num_pts, 3), 1.0 / 3.0)
+        tri_indices = torch.arange(num_pts, dtype=torch.long)
+        pcd = MeshPointCloud(
+            alpha=alpha,
+            points=xyz,
+            colors=tri_avg_colors / 255.0,
+            normals=np.zeros((num_pts, 3)),
+            vertices=vertices,
+            faces=faces,
+            transform_vertices_function=transform_vertices_function,
+            triangles=triangles.cuda(),
+            triangle_indices=tri_indices,
+        )
+        storePly(ply_path, pcd.points, tri_avg_colors)
+        print(f"[INFO] skip_sampling: built mesh-geometry-only point cloud ({num_pts} faces).")
+
+    elif True:
+
         assert budget_per_tri is not None or total_splats is not None, "Either num_splats or total_splats must be provided for budgeting!"
-        
+
         if total_splats is None:
             total_splats = int(budget_per_tri * triangles.shape[0])
             print(f"[INFO] total_splats not provided, computed from budget_per_tri: {total_splats} splats")
